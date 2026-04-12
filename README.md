@@ -2,8 +2,6 @@
 
 **Turn code into plain English — for the people who don't speak it.**
 
-> **GitHub:** [github.com/hihipy/decode-for-humans](https://github.com/hihipy/decode-for-humans)
-
 `decode-for-humans` reads source code files and explains what they do in
 clear, jargon-free language that anyone can understand — no programming
 knowledge required. It produces a clean **Markdown** and **plain-text**
