@@ -95,17 +95,17 @@ Click **Batch folder** to process an entire directory at once:
 
 | Category | Languages |
 |---|---|
-| **Notebooks** | Jupyter, Quarto, R Markdown, Markdown |
-| **Data Science** | Python, R, Julia, SQL |
-| **JavaScript / TypeScript** | JS, TS, JSX, TSX |
-| **JVM & .NET** | Java, Kotlin, Scala, Groovy, C#, F#, Visual Basic |
+| **Notebooks** | Jupyter, Markdown, Quarto, R Markdown |
+| **Data Science** | Julia, Python, R, SQL |
+| **JavaScript / TypeScript** | JS, JSX, TS, TSX |
+| **JVM & .NET** | C#, F#, Groovy, Java, Kotlin, Scala, Visual Basic |
 | **Systems** | C, C++, Go, Rust, Swift |
-| **Scripting** | Ruby, PHP, Lua, Perl, Dart, Elixir, Erlang |
-| **Shell & Infra** | Bash, Zsh, Fish, PowerShell, Dockerfile, Terraform |
-| **Web** | HTML, CSS, SCSS, Sass, Less |
-| **Config & Data** | JSON, YAML, TOML, XML, INI |
-| **Functional** | Haskell, OCaml, Clojure, ClojureScript |
-| **Other** | Protocol Buffers, SVG, MATLAB |
+| **Scripting** | Dart, Elixir, Erlang, Lua, Perl, PHP, Ruby |
+| **Shell & Infra** | Bash, Dockerfile, Fish, PowerShell, Terraform, Zsh |
+| **Web** | CSS, HTML, Less, Sass, SCSS |
+| **Config & Data** | INI, JSON, TOML, XML, YAML |
+| **Functional** | Clojure, ClojureScript, Haskell, OCaml |
+| **Other** | MATLAB, Protocol Buffers, SVG |
 
 ---
 
