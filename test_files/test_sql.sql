@@ -1,369 +1,454 @@
 -- test_sql.sql
 --
--- E-commerce analytics database for a multi-region retail platform.
+-- Holistic SQL showcase — multi-tenant SaaS analytics platform.
 --
--- Covers: schema creation, constraints, indexes, views, CTEs,
--- window functions, stored procedures, triggers, and complex
--- reporting queries used by the business intelligence team.
+-- Covers: DDL (tables, constraints, indexes, sequences), DML (insert,
+-- update, delete, upsert), views, materialised views, CTEs, recursive CTEs,
+-- window functions (rank, lag, lead, ntile, running totals), stored
+-- procedures, functions, triggers, full-text search, JSON operations,
+-- pivot-style queries, cohort analysis, funnel analysis, and partitioning.
 
 
 -- ===========================================================================
--- SCHEMA SETUP
+-- EXTENSIONS
 -- ===========================================================================
 
-CREATE TABLE IF NOT EXISTS regions (
-    region_id   SERIAL       PRIMARY KEY,
-    region_name VARCHAR(100) NOT NULL UNIQUE,
-    currency    CHAR(3)      NOT NULL DEFAULT 'USD',
-    timezone    VARCHAR(50)  NOT NULL DEFAULT 'UTC'
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS pg_trgm;           -- trigram fuzzy search
+
+
+-- ===========================================================================
+-- SCHEMA
+-- ===========================================================================
+
+-- Tenants (organisations using the SaaS platform)
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id    UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+    slug         VARCHAR(63)  NOT NULL UNIQUE,
+    name         VARCHAR(255) NOT NULL,
+    plan         VARCHAR(20)  NOT NULL DEFAULT 'free'
+                              CHECK (plan IN ('free','starter','pro','enterprise')),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    cancelled_at TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS customers (
-    customer_id   SERIAL        PRIMARY KEY,
-    email         VARCHAR(255)  NOT NULL UNIQUE,
-    first_name    VARCHAR(100)  NOT NULL,
-    last_name     VARCHAR(100)  NOT NULL,
-    region_id     INT           NOT NULL REFERENCES regions(region_id),
-    signup_date   DATE          NOT NULL DEFAULT CURRENT_DATE,
-    is_active     BOOLEAN       NOT NULL DEFAULT TRUE,
-    lifetime_spend NUMERIC(12,2) NOT NULL DEFAULT 0.00
+-- Users
+CREATE TABLE IF NOT EXISTS users (
+    user_id      UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id    UUID         NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    email        VARCHAR(320) NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
+    role         VARCHAR(20)  NOT NULL DEFAULT 'member'
+                              CHECK (role IN ('owner','admin','member','guest')),
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ,
+    metadata     JSONB        NOT NULL DEFAULT '{}',
+    UNIQUE (tenant_id, email)
 );
 
-CREATE TABLE IF NOT EXISTS product_categories (
-    category_id   SERIAL      PRIMARY KEY,
-    category_name VARCHAR(100) NOT NULL UNIQUE,
-    parent_id     INT          REFERENCES product_categories(category_id)
+-- Events (user actions tracked by the platform)
+CREATE TABLE IF NOT EXISTS events (
+    event_id     BIGSERIAL    PRIMARY KEY,
+    tenant_id    UUID         NOT NULL REFERENCES tenants(tenant_id),
+    user_id      UUID         REFERENCES users(user_id),
+    session_id   VARCHAR(64),
+    event_name   VARCHAR(100) NOT NULL,
+    occurred_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    properties   JSONB        NOT NULL DEFAULT '{}'
+) PARTITION BY RANGE (occurred_at);
+
+-- Monthly partitions
+CREATE TABLE IF NOT EXISTS events_2024_01 PARTITION OF events
+    FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+CREATE TABLE IF NOT EXISTS events_2024_02 PARTITION OF events
+    FOR VALUES FROM ('2024-02-01') TO ('2024-03-01');
+CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT;
+
+-- Subscriptions
+CREATE TABLE IF NOT EXISTS subscriptions (
+    sub_id       UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id    UUID         NOT NULL REFERENCES tenants(tenant_id),
+    plan         VARCHAR(20)  NOT NULL,
+    starts_at    DATE         NOT NULL,
+    ends_at      DATE,
+    mrr_cents    INT          NOT NULL DEFAULT 0,
+    cancelled_at TIMESTAMPTZ,
+    CONSTRAINT positive_mrr CHECK (mrr_cents >= 0)
 );
 
-CREATE TABLE IF NOT EXISTS products (
-    product_id    SERIAL        PRIMARY KEY,
-    sku           VARCHAR(50)   NOT NULL UNIQUE,
-    product_name  VARCHAR(255)  NOT NULL,
-    category_id   INT           NOT NULL REFERENCES product_categories(category_id),
-    unit_price    NUMERIC(10,2) NOT NULL CHECK (unit_price >= 0),
-    stock_qty     INT           NOT NULL DEFAULT 0 CHECK (stock_qty >= 0),
-    is_active     BOOLEAN       NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+-- Feature flags
+CREATE TABLE IF NOT EXISTS feature_flags (
+    flag_id      SERIAL       PRIMARY KEY,
+    flag_key     VARCHAR(100) NOT NULL UNIQUE,
+    enabled      BOOLEAN      NOT NULL DEFAULT FALSE,
+    rollout_pct  NUMERIC(5,2) NOT NULL DEFAULT 0
+                              CHECK (rollout_pct BETWEEN 0 AND 100),
+    tenant_ids   UUID[]       NOT NULL DEFAULT '{}',
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS orders (
-    order_id      SERIAL        PRIMARY KEY,
-    customer_id   INT           NOT NULL REFERENCES customers(customer_id),
-    region_id     INT           NOT NULL REFERENCES regions(region_id),
-    order_status  VARCHAR(20)   NOT NULL DEFAULT 'pending'
-                                CHECK (order_status IN
-                                  ('pending','confirmed','shipped','delivered','cancelled')),
-    placed_at     TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    shipped_at    TIMESTAMPTZ,
-    delivered_at  TIMESTAMPTZ,
-    total_amount  NUMERIC(12,2) NOT NULL DEFAULT 0.00
+-- Audit log
+CREATE TABLE IF NOT EXISTS audit_log (
+    log_id       BIGSERIAL    PRIMARY KEY,
+    tenant_id    UUID,
+    user_id      UUID,
+    action       VARCHAR(100) NOT NULL,
+    target_table VARCHAR(100),
+    target_id    TEXT,
+    old_values   JSONB,
+    new_values   JSONB,
+    occurred_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS order_lines (
-    line_id       SERIAL        PRIMARY KEY,
-    order_id      INT           NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE,
-    product_id    INT           NOT NULL REFERENCES products(product_id),
-    quantity      INT           NOT NULL CHECK (quantity > 0),
-    unit_price    NUMERIC(10,2) NOT NULL,
-    line_total    NUMERIC(12,2) GENERATED ALWAYS AS (quantity * unit_price) STORED
-);
-
-CREATE TABLE IF NOT EXISTS promotions (
-    promo_id      SERIAL       PRIMARY KEY,
-    promo_code    VARCHAR(50)  NOT NULL UNIQUE,
-    discount_pct  NUMERIC(5,2) NOT NULL CHECK (discount_pct BETWEEN 0 AND 100),
-    starts_at     DATE         NOT NULL,
-    ends_at       DATE         NOT NULL,
-    usage_limit   INT,
-    times_used    INT          NOT NULL DEFAULT 0,
-    CHECK (ends_at > starts_at)
-);
-
--- Indexes for commonly filtered and joined columns
-CREATE INDEX IF NOT EXISTS idx_orders_customer   ON orders(customer_id);
-CREATE INDEX IF NOT EXISTS idx_orders_status     ON orders(order_status);
-CREATE INDEX IF NOT EXISTS idx_orders_placed     ON orders(placed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_order_lines_order ON order_lines(order_id);
-CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
-CREATE INDEX IF NOT EXISTS idx_customers_region  ON customers(region_id);
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_events_tenant_time   ON events (tenant_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_user_time     ON events (user_id,   occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_name          ON events (event_name);
+CREATE INDEX IF NOT EXISTS idx_events_props         ON events USING GIN (properties);
+CREATE INDEX IF NOT EXISTS idx_users_email_trgm     ON users  USING GIN (email gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_users_metadata       ON users  USING GIN (metadata);
 
 
 -- ===========================================================================
 -- VIEWS
 -- ===========================================================================
 
--- Denormalised order summary used by reporting dashboards
-CREATE OR REPLACE VIEW v_order_summary AS
+CREATE OR REPLACE VIEW v_active_tenants AS
 SELECT
-    o.order_id,
-    o.placed_at,
-    o.order_status,
-    c.customer_id,
-    c.email,
-    c.first_name || ' ' || c.last_name  AS customer_name,
-    r.region_name,
-    r.currency,
-    COUNT(ol.line_id)                   AS line_count,
-    SUM(ol.line_total)                  AS calculated_total,
-    o.total_amount                      AS recorded_total,
-    EXTRACT(EPOCH FROM (o.shipped_at - o.placed_at)) / 3600
-                                        AS hours_to_ship
-FROM orders o
-JOIN customers c  ON c.customer_id = o.customer_id
-JOIN regions r    ON r.region_id   = o.region_id
-JOIN order_lines ol ON ol.order_id = o.order_id
-GROUP BY
-    o.order_id, o.placed_at, o.order_status,
-    c.customer_id, c.email, c.first_name, c.last_name,
-    r.region_name, r.currency, o.shipped_at, o.total_amount;
+    t.tenant_id,
+    t.name,
+    t.plan,
+    t.created_at,
+    COUNT(DISTINCT u.user_id)       AS user_count,
+    MAX(u.last_seen_at)             AS last_activity,
+    SUM(s.mrr_cents) / 100.0       AS mrr_dollars
+FROM  tenants t
+LEFT JOIN users         u ON u.tenant_id = t.tenant_id
+LEFT JOIN subscriptions s ON s.tenant_id = t.tenant_id AND s.cancelled_at IS NULL
+WHERE t.cancelled_at IS NULL
+GROUP BY t.tenant_id, t.name, t.plan, t.created_at;
+
+
+-- Materialised view for heavy dashboard queries
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_event_counts AS
+SELECT
+    tenant_id,
+    event_name,
+    DATE_TRUNC('day', occurred_at)::DATE AS day,
+    COUNT(*)                             AS event_count,
+    COUNT(DISTINCT user_id)              AS unique_users,
+    COUNT(DISTINCT session_id)           AS sessions
+FROM events
+GROUP BY 1, 2, 3
+WITH NO DATA;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_events
+    ON mv_daily_event_counts (tenant_id, event_name, day);
+
+-- Refresh command (run on a schedule):
+-- REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_event_counts;
 
 
 -- ===========================================================================
--- STORED PROCEDURE — place an order
+-- FUNCTIONS
 -- ===========================================================================
 
-CREATE OR REPLACE PROCEDURE place_order(
-    p_customer_id  INT,
-    p_items        JSONB       -- [{"product_id": 1, "quantity": 2}, ...]
+-- Check whether a tenant has a specific feature flag enabled
+CREATE OR REPLACE FUNCTION is_feature_enabled(
+    p_tenant_id UUID,
+    p_flag_key  VARCHAR
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_flag feature_flags%ROWTYPE;
+BEGIN
+    SELECT * INTO v_flag FROM feature_flags WHERE flag_key = p_flag_key;
+    IF NOT FOUND THEN RETURN FALSE; END IF;
+    IF NOT v_flag.enabled THEN RETURN FALSE; END IF;
+    IF p_tenant_id = ANY(v_flag.tenant_ids) THEN RETURN TRUE; END IF;
+    RETURN (RANDOM() * 100) < v_flag.rollout_pct;
+END;
+$$;
+
+
+-- Compute MRR for a given month
+CREATE OR REPLACE FUNCTION monthly_mrr(p_month DATE)
+RETURNS NUMERIC
+LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(SUM(mrr_cents), 0) / 100.0
+    FROM   subscriptions
+    WHERE  starts_at <= p_month
+      AND  (ends_at IS NULL OR ends_at > p_month)
+      AND  cancelled_at IS NULL;
+$$;
+
+
+-- ===========================================================================
+-- STORED PROCEDURE
+-- ===========================================================================
+
+CREATE OR REPLACE PROCEDURE provision_tenant(
+    p_slug        VARCHAR,
+    p_name        VARCHAR,
+    p_owner_email VARCHAR,
+    p_owner_name  VARCHAR,
+    p_plan        VARCHAR DEFAULT 'free',
+    OUT o_tenant_id UUID,
+    OUT o_user_id   UUID
 )
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_order_id   INT;
-    v_region_id  INT;
-    v_item       JSONB;
-    v_product_id INT;
-    v_qty        INT;
-    v_price      NUMERIC(10,2);
-    v_total      NUMERIC(12,2) := 0;
+    v_mrr_cents INT := CASE p_plan
+        WHEN 'starter'    THEN 1900
+        WHEN 'pro'        THEN 4900
+        WHEN 'enterprise' THEN 19900
+        ELSE 0
+    END;
 BEGIN
-    -- Look up the customer's region
-    SELECT region_id INTO v_region_id
-    FROM customers
-    WHERE customer_id = p_customer_id AND is_active = TRUE;
+    INSERT INTO tenants (slug, name, plan)
+    VALUES (p_slug, p_name, p_plan)
+    RETURNING tenant_id INTO o_tenant_id;
 
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Customer % not found or inactive', p_customer_id;
+    INSERT INTO users (tenant_id, email, display_name, role)
+    VALUES (o_tenant_id, p_owner_email, p_owner_name, 'owner')
+    RETURNING user_id INTO o_user_id;
+
+    IF v_mrr_cents > 0 THEN
+        INSERT INTO subscriptions (tenant_id, plan, starts_at, mrr_cents)
+        VALUES (o_tenant_id, p_plan, CURRENT_DATE, v_mrr_cents);
     END IF;
 
-    -- Create the order header
-    INSERT INTO orders (customer_id, region_id, order_status)
-    VALUES (p_customer_id, v_region_id, 'pending')
-    RETURNING order_id INTO v_order_id;
+    INSERT INTO audit_log (tenant_id, user_id, action, target_table, target_id, new_values)
+    VALUES (
+        o_tenant_id, o_user_id, 'tenant.provisioned', 'tenants',
+        o_tenant_id::TEXT,
+        jsonb_build_object('slug', p_slug, 'plan', p_plan)
+    );
 
-    -- Process each line item
-    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items)
-    LOOP
-        v_product_id := (v_item->>'product_id')::INT;
-        v_qty        := (v_item->>'quantity')::INT;
-
-        -- Lock the row to prevent overselling in concurrent transactions
-        SELECT unit_price INTO v_price
-        FROM products
-        WHERE product_id = v_product_id
-          AND is_active  = TRUE
-          AND stock_qty  >= v_qty
-        FOR UPDATE;
-
-        IF NOT FOUND THEN
-            RAISE EXCEPTION
-                'Product % unavailable or insufficient stock for qty %',
-                v_product_id, v_qty;
-        END IF;
-
-        INSERT INTO order_lines (order_id, product_id, quantity, unit_price)
-        VALUES (v_order_id, v_product_id, v_qty, v_price);
-
-        UPDATE products
-        SET stock_qty = stock_qty - v_qty
-        WHERE product_id = v_product_id;
-
-        v_total := v_total + (v_price * v_qty);
-    END LOOP;
-
-    -- Write the final total back to the order header
-    UPDATE orders
-    SET total_amount = v_total,
-        order_status = 'confirmed'
-    WHERE order_id = v_order_id;
-
-    -- Keep the customer's lifetime spend up to date
-    UPDATE customers
-    SET lifetime_spend = lifetime_spend + v_total
-    WHERE customer_id = p_customer_id;
-
-    RAISE NOTICE 'Order % placed successfully. Total: %', v_order_id, v_total;
+    RAISE NOTICE 'Provisioned tenant % (%) with owner %', p_name, o_tenant_id, p_owner_email;
 END;
 $$;
 
 
 -- ===========================================================================
--- TRIGGER — log status changes
+-- TRIGGERS
 -- ===========================================================================
 
-CREATE TABLE IF NOT EXISTS order_status_log (
-    log_id       SERIAL      PRIMARY KEY,
-    order_id     INT         NOT NULL,
-    old_status   VARCHAR(20),
-    new_status   VARCHAR(20) NOT NULL,
-    changed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE OR REPLACE FUNCTION fn_log_order_status_change()
+CREATE OR REPLACE FUNCTION fn_update_last_seen()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
-    IF OLD.order_status IS DISTINCT FROM NEW.order_status THEN
-        INSERT INTO order_status_log (order_id, old_status, new_status)
-        VALUES (NEW.order_id, OLD.order_status, NEW.order_status);
+    IF NEW.event_name = 'session.start' AND NEW.user_id IS NOT NULL THEN
+        UPDATE users SET last_seen_at = NEW.occurred_at
+        WHERE user_id = NEW.user_id;
     END IF;
     RETURN NEW;
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_order_status ON orders;
-CREATE TRIGGER trg_order_status
-AFTER UPDATE OF order_status ON orders
-FOR EACH ROW EXECUTE FUNCTION fn_log_order_status_change();
+DROP TRIGGER IF EXISTS trg_update_last_seen ON events;
+CREATE TRIGGER trg_update_last_seen
+AFTER INSERT ON events
+FOR EACH ROW EXECUTE FUNCTION fn_update_last_seen();
+
+
+CREATE OR REPLACE FUNCTION fn_audit_users()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO audit_log (tenant_id, action, target_table, target_id, old_values, new_values)
+    VALUES (
+        COALESCE(NEW.tenant_id, OLD.tenant_id),
+        TG_OP || '.users',
+        'users',
+        COALESCE(NEW.user_id, OLD.user_id)::TEXT,
+        CASE TG_OP WHEN 'INSERT' THEN NULL ELSE to_jsonb(OLD) END,
+        CASE TG_OP WHEN 'DELETE' THEN NULL ELSE to_jsonb(NEW) END
+    );
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_audit_users ON users;
+CREATE TRIGGER trg_audit_users
+AFTER INSERT OR UPDATE OR DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION fn_audit_users();
 
 
 -- ===========================================================================
 -- ANALYTICS QUERIES
 -- ===========================================================================
 
--- ── 1. Month-over-month revenue with growth rate ─────────────────────────
-
-WITH monthly_revenue AS (
+-- ── 1. MRR movement — new, expansion, churn ──────────────────────────────
+WITH monthly AS (
     SELECT
-        DATE_TRUNC('month', placed_at)::DATE AS month,
-        SUM(total_amount)                    AS revenue
-    FROM orders
-    WHERE order_status NOT IN ('cancelled', 'pending')
+        DATE_TRUNC('month', starts_at)::DATE AS month,
+        SUM(mrr_cents)                       AS new_mrr
+    FROM subscriptions
+    WHERE cancelled_at IS NULL
     GROUP BY 1
 ),
-revenue_with_lag AS (
+churned AS (
     SELECT
-        month,
-        revenue,
-        LAG(revenue) OVER (ORDER BY month) AS prev_revenue
-    FROM monthly_revenue
+        DATE_TRUNC('month', cancelled_at)::DATE AS month,
+        SUM(mrr_cents)                          AS churned_mrr
+    FROM subscriptions
+    WHERE cancelled_at IS NOT NULL
+    GROUP BY 1
 )
 SELECT
-    month,
-    revenue,
-    prev_revenue,
-    ROUND(
-        (revenue - prev_revenue) / NULLIF(prev_revenue, 0) * 100,
-        2
-    ) AS growth_pct
-FROM revenue_with_lag
-ORDER BY month DESC;
+    COALESCE(m.month, c.month)           AS month,
+    COALESCE(m.new_mrr,     0) / 100.0   AS new_mrr,
+    COALESCE(c.churned_mrr, 0) / 100.0   AS churned_mrr,
+    (COALESCE(m.new_mrr, 0) - COALESCE(c.churned_mrr, 0)) / 100.0 AS net_mrr
+FROM monthly m
+FULL OUTER JOIN churned c ON c.month = m.month
+ORDER BY month;
 
 
--- ── 2. Customer lifetime value segmentation ──────────────────────────────
-
-WITH customer_stats AS (
-    SELECT
-        c.customer_id,
-        c.email,
-        c.lifetime_spend,
-        COUNT(DISTINCT o.order_id)    AS order_count,
-        MAX(o.placed_at)              AS last_order_date,
-        MIN(o.placed_at)              AS first_order_date,
-        AVG(o.total_amount)           AS avg_order_value
-    FROM customers c
-    LEFT JOIN orders o
-        ON o.customer_id = c.customer_id
-        AND o.order_status = 'delivered'
-    GROUP BY c.customer_id, c.email, c.lifetime_spend
-),
-segmented AS (
-    SELECT
-        *,
-        CASE
-            WHEN lifetime_spend >= 5000 THEN 'VIP'
-            WHEN lifetime_spend >= 1000 THEN 'Loyal'
-            WHEN lifetime_spend >= 250  THEN 'Regular'
-            WHEN order_count    = 0     THEN 'Never Ordered'
-            ELSE 'Occasional'
-        END AS segment,
-        NTILE(4) OVER (ORDER BY lifetime_spend) AS spend_quartile
-    FROM customer_stats
-)
-SELECT
-    segment,
-    spend_quartile,
-    COUNT(*)                            AS customer_count,
-    ROUND(AVG(lifetime_spend), 2)       AS avg_lifetime_spend,
-    ROUND(AVG(avg_order_value), 2)      AS avg_order_value,
-    ROUND(AVG(order_count), 1)          AS avg_orders
-FROM segmented
-GROUP BY segment, spend_quartile
-ORDER BY avg_lifetime_spend DESC;
-
-
--- ── 3. Top products by revenue with category rollup ─────────────────────
-
-WITH product_revenue AS (
-    SELECT
-        p.product_id,
-        p.product_name,
-        p.sku,
-        pc.category_name,
-        SUM(ol.quantity)              AS units_sold,
-        SUM(ol.line_total)            AS total_revenue,
-        COUNT(DISTINCT o.customer_id) AS unique_buyers
-    FROM order_lines ol
-    JOIN orders o    ON o.order_id    = ol.order_id
-    JOIN products p  ON p.product_id  = ol.product_id
-    JOIN product_categories pc ON pc.category_id = p.category_id
-    WHERE o.order_status = 'delivered'
-    GROUP BY p.product_id, p.product_name, p.sku, pc.category_name
-),
-ranked AS (
-    SELECT
-        *,
-        RANK() OVER (
-            PARTITION BY category_name
-            ORDER BY total_revenue DESC
-        ) AS rank_in_category,
-        ROUND(
-            total_revenue / SUM(total_revenue) OVER () * 100,
-            2
-        ) AS revenue_share_pct
-    FROM product_revenue
-)
-SELECT *
-FROM ranked
-WHERE rank_in_category <= 5
-ORDER BY category_name, rank_in_category;
-
-
--- ── 4. Cohort retention — customers ordering in month N who reorder ──────
-
+-- ── 2. Retention — weekly cohorts ────────────────────────────────────────
 WITH cohorts AS (
     SELECT
-        customer_id,
-        DATE_TRUNC('month', MIN(placed_at))::DATE AS cohort_month
-    FROM orders
-    WHERE order_status NOT IN ('cancelled', 'pending')
-    GROUP BY customer_id
+        user_id,
+        DATE_TRUNC('week', MIN(occurred_at))::DATE AS cohort_week
+    FROM events
+    WHERE event_name = 'session.start'
+    GROUP BY user_id
 ),
-cohort_orders AS (
+weekly_activity AS (
     SELECT
-        c.customer_id,
-        c.cohort_month,
-        DATE_TRUNC('month', o.placed_at)::DATE AS order_month,
-        (DATE_PART('year',  DATE_TRUNC('month', o.placed_at)) -
-         DATE_PART('year',  c.cohort_month)) * 12 +
-        (DATE_PART('month', DATE_TRUNC('month', o.placed_at)) -
-         DATE_PART('month', c.cohort_month)) AS months_since_first
+        c.user_id,
+        c.cohort_week,
+        DATE_TRUNC('week', e.occurred_at)::DATE AS activity_week,
+        (DATE_TRUNC('week', e.occurred_at) - c.cohort_week::TIMESTAMPTZ)
+            / INTERVAL '7 days'                   AS week_number
     FROM cohorts c
-    JOIN orders o ON o.customer_id = c.customer_id
-    WHERE o.order_status NOT IN ('cancelled', 'pending')
+    JOIN events e ON e.user_id = c.user_id AND e.event_name = 'session.start'
 )
 SELECT
-    cohort_month,
-    months_since_first          AS month_number,
-    COUNT(DISTINCT customer_id) AS active_customers
-FROM cohort_orders
-GROUP BY cohort_month, months_since_first
-ORDER BY cohort_month, months_since_first;
+    cohort_week,
+    week_number::INT,
+    COUNT(DISTINCT user_id)  AS retained_users
+FROM weekly_activity
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+
+-- ── 3. Funnel analysis ───────────────────────────────────────────────────
+WITH funnel_steps AS (
+    SELECT
+        user_id,
+        session_id,
+        MAX(CASE WHEN event_name = 'page.view'       THEN 1 ELSE 0 END) AS step1,
+        MAX(CASE WHEN event_name = 'signup.start'    THEN 1 ELSE 0 END) AS step2,
+        MAX(CASE WHEN event_name = 'signup.complete' THEN 1 ELSE 0 END) AS step3,
+        MAX(CASE WHEN event_name = 'onboard.finish'  THEN 1 ELSE 0 END) AS step4
+    FROM events
+    WHERE occurred_at >= NOW() - INTERVAL '30 days'
+    GROUP BY user_id, session_id
+)
+SELECT
+    SUM(step1)                        AS page_views,
+    SUM(step2)                        AS started_signup,
+    SUM(step3)                        AS completed_signup,
+    SUM(step4)                        AS onboarded,
+    ROUND(SUM(step2)::NUMERIC / NULLIF(SUM(step1), 0) * 100, 1) AS pct_started,
+    ROUND(SUM(step3)::NUMERIC / NULLIF(SUM(step2), 0) * 100, 1) AS pct_converted,
+    ROUND(SUM(step4)::NUMERIC / NULLIF(SUM(step3), 0) * 100, 1) AS pct_onboarded
+FROM funnel_steps;
+
+
+-- ── 4. Window functions — ranking, running totals, lag ───────────────────
+WITH tenant_revenue AS (
+    SELECT
+        t.tenant_id,
+        t.name,
+        t.plan,
+        DATE_TRUNC('month', s.starts_at)::DATE   AS month,
+        SUM(s.mrr_cents) / 100.0                 AS mrr
+    FROM tenants t
+    JOIN subscriptions s ON s.tenant_id = t.tenant_id
+    GROUP BY 1, 2, 3, 4
+)
+SELECT
+    tenant_id,
+    name,
+    plan,
+    month,
+    mrr,
+    LAG(mrr)  OVER (PARTITION BY tenant_id ORDER BY month)  AS prev_mrr,
+    LEAD(mrr) OVER (PARTITION BY tenant_id ORDER BY month)  AS next_mrr,
+    SUM(mrr)  OVER (PARTITION BY tenant_id ORDER BY month
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_mrr,
+    RANK()    OVER (PARTITION BY month ORDER BY mrr DESC)  AS rank_this_month,
+    NTILE(4)  OVER (ORDER BY mrr DESC)                     AS quartile
+FROM tenant_revenue
+ORDER BY month, rank_this_month;
+
+
+-- ── 5. Recursive CTE — organisational hierarchy ──────────────────────────
+WITH RECURSIVE org_tree AS (
+    SELECT
+        user_id,
+        display_name,
+        role,
+        tenant_id,
+        0 AS depth,
+        display_name::TEXT AS path
+    FROM users
+    WHERE role = 'owner'
+
+    UNION ALL
+
+    SELECT
+        u.user_id,
+        u.display_name,
+        u.role,
+        u.tenant_id,
+        ot.depth + 1,
+        ot.path || ' > ' || u.display_name
+    FROM users u
+    JOIN org_tree ot ON ot.tenant_id = u.tenant_id AND ot.depth < 5
+    WHERE u.role IN ('admin', 'member')
+)
+SELECT depth, role, display_name, path
+FROM org_tree
+ORDER BY path;
+
+
+-- ── 6. JSON operations ───────────────────────────────────────────────────
+SELECT
+    user_id,
+    email,
+    metadata->>'plan'                               AS plan_from_meta,
+    metadata->'preferences'->>'theme'               AS theme,
+    jsonb_array_length(metadata->'roles')           AS role_count,
+    metadata @> '{"verified": true}'::jsonb         AS is_verified,
+    jsonb_object_keys(metadata)                     AS meta_key
+FROM users
+WHERE metadata != '{}'
+ORDER BY user_id;
+
+
+-- ── 7. Upsert and bulk operations ────────────────────────────────────────
+INSERT INTO feature_flags (flag_key, enabled, rollout_pct)
+VALUES
+    ('dark_mode',        TRUE,  100),
+    ('new_dashboard',    TRUE,   50),
+    ('ai_suggestions',   FALSE,   0),
+    ('bulk_export',      TRUE,   25)
+ON CONFLICT (flag_key) DO UPDATE
+    SET enabled     = EXCLUDED.enabled,
+        rollout_pct = EXCLUDED.rollout_pct,
+        updated_at  = NOW();
+
+
+-- ── 8. Full-text and fuzzy search ────────────────────────────────────────
+SELECT
+    user_id,
+    email,
+    display_name,
+    similarity(email, 'alice@example.com')  AS fuzzy_score
+FROM users
+WHERE email % 'alice@example.com'          -- trigram similarity operator
+ORDER BY fuzzy_score DESC
+LIMIT 10;
