@@ -260,7 +260,7 @@ def _is_binary(data: bytes) -> bool:
 
 
 def _is_minified(text: str) -> bool:
-    lines = [line for line in text.splitlines() if line.strip()]
+    lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
         return False
     avg_len = sum(len(l) for l in lines) / len(lines)
