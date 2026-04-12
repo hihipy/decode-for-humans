@@ -124,6 +124,14 @@ Nothing is sent anywhere except the AI provider you choose.
 
 ---
 
+## Security and privacy
+
+- **Your code is sent to the AI provider you choose.** When you decode a file, its full contents are transmitted to Anthropic, OpenAI, Google, Mistral, or Groq depending on which provider is active. Do not decode files containing passwords, private keys, proprietary trade secrets, or personally identifiable information. Check your provider's data usage policy before decoding sensitive code.
+- **API keys are stored in plaintext** at `~/.decode_for_humans/config.json` on your local machine. This file is excluded from version control by `.gitignore`. Do not share this file or commit it to a repository.
+- **No data is collected by this tool.** Nothing is logged, transmitted, or stored anywhere other than your local machine and the AI provider you choose.
+
+---
+
 ## Requirements
 
 - Python 3.10+
@@ -138,7 +146,7 @@ No LaTeX, no external binaries, no database. Pure Python.
 ## Project structure
 
 ```
-decode_for_humans/
+decode-for-humans/
 ├── gui.py                  # Desktop GUI (CustomTkinter)
 ├── decode_for_humans.py    # Core pipeline — file reading, prompts, MD/TXT output
 ├── providers/
@@ -153,7 +161,6 @@ decode_for_humans/
 ```
 
 ---
-
 
 ## License
 
