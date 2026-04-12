@@ -1,438 +1,550 @@
 /**
  * test_javascript.js
  *
- * A client-side inventory management module for a retail web application.
+ * Holistic JavaScript showcase — real-time event ticketing platform.
  *
- * Handles fetching product data from a REST API, local caching with
- * expiry, search and filtering, cart management, and checkout submission.
- * Uses modern ES2022+ syntax throughout.
+ * Covers: ES2022+ classes, private fields, static blocks, closures,
+ * promises, async/await, generators, iterators, Proxy, WeakMap, Symbol,
+ * destructuring, spread/rest, optional chaining, nullish coalescing,
+ * tagged template literals, Map/Set, error subclassing, module patterns,
+ * prototype chain, getter/setter, Reflect, event emitter pattern,
+ * memoisation, debounce/throttle, pipeline operator pattern, and more.
  */
 
 "use strict";
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants and symbols
 // ---------------------------------------------------------------------------
 
-const API_BASE_URL      = "https://api.example-store.com/v2";
-const CACHE_TTL_MS      = 5 * 60 * 1000;   // 5 minutes
-const MAX_CART_ITEMS    = 50;
-const LOW_STOCK_CUTOFF  = 5;
-const RETRY_ATTEMPTS    = 3;
-const RETRY_DELAY_MS    = 1000;
+const APP_VERSION       = "3.1.0";
+const MAX_TICKETS       = 500;
+const BOOKING_FEE_PCT   = 0.05;
+const REFUND_WINDOW_MS  = 48 * 60 * 60 * 1000;   // 48 hours
+const SOLD_OUT_SYMBOL   = Symbol("SOLD_OUT");
+const CANCELLED_SYMBOL  = Symbol("CANCELLED");
 
 // ---------------------------------------------------------------------------
-// Utility helpers
+// Utility — pure functions
 // ---------------------------------------------------------------------------
 
-/**
- * Pause execution for the given number of milliseconds.
- * @param {number} ms - Duration to wait.
- * @returns {Promise<void>}
- */
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const formatCurrency = (amount, currency = "GBP") =>
+  new Intl.NumberFormat("en-GB", { style: "currency", currency }).format(amount);
 
-/**
- * Deep-clone a plain object using structured clone when available.
- * @template T
- * @param {T} obj - Object to clone.
- * @returns {T}
- */
-const deepClone = (obj) =>
-  typeof structuredClone === "function"
-    ? structuredClone(obj)
-    : JSON.parse(JSON.stringify(obj));
+const formatDate = (date) =>
+  new Intl.DateTimeFormat("en-GB", {
+    dateStyle: "long", timeStyle: "short",
+  }).format(date);
 
-/**
- * Format a number as a currency string.
- * @param {number} amount - Numeric amount in the base currency unit.
- * @param {string} [currency="USD"] - ISO 4217 currency code.
- * @returns {string} Formatted string e.g. "$12.99".
- */
-const formatCurrency = (amount, currency = "USD") =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency }).format(amount);
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const generateId = (() => {
+  let counter = 1000;
+  return (prefix = "ID") => `${prefix}-${(++counter).toString(36).toUpperCase()}`;
+})();
+
+// Memoisation
+const memoize = (fn) => {
+  const cache = new Map();
+  return (...args) => {
+    const key = JSON.stringify(args);
+    if (!cache.has(key)) cache.set(key, fn(...args));
+    return cache.get(key);
+  };
+};
+
+// Debounce
+const debounce = (fn, ms) => {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+};
+
+// Tagged template — sanitise HTML
+const safe = (strings, ...values) =>
+  strings.reduce((acc, str, i) => {
+    const val = values[i - 1] ?? "";
+    return acc + String(val).replace(/[<>&"]/g, (c) =>
+      ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c])
+    ) + str;
+  });
 
 // ---------------------------------------------------------------------------
-// In-memory cache
+// Custom errors
 // ---------------------------------------------------------------------------
 
-class ExpiringCache {
-  /**
-   * A simple key-value store where entries expire after a fixed TTL.
-   * @param {number} ttlMs - Time-to-live in milliseconds for each entry.
-   */
-  constructor(ttlMs = CACHE_TTL_MS) {
-    /** @type {Map<string, { value: any, expiresAt: number }>} */
-    this._store  = new Map();
-    this._ttlMs  = ttlMs;
+class AppError extends Error {
+  constructor(message, code = "ERR_GENERIC") {
+    super(message);
+    this.name = this.constructor.name;
+    this.code = code;
+  }
+}
+
+class SoldOutError    extends AppError { constructor(e) { super(`Event "${e}" is sold out.`, "ERR_SOLD_OUT"); } }
+class BookingError    extends AppError {}
+class RefundError     extends AppError {}
+class ValidationError extends AppError { constructor(f, m) { super(`${f}: ${m}`, "ERR_VALIDATION"); } }
+
+// ---------------------------------------------------------------------------
+// Event emitter (mixin pattern)
+// ---------------------------------------------------------------------------
+
+class EventEmitter {
+  #listeners = new Map();
+
+  on(event, handler) {
+    if (!this.#listeners.has(event)) this.#listeners.set(event, new Set());
+    this.#listeners.get(event).add(handler);
+    return () => this.off(event, handler);
   }
 
-  /**
-   * Read a cached value, returning undefined if missing or expired.
-   * @param {string} key
-   * @returns {any | undefined}
-   */
-  get(key) {
-    const entry = this._store.get(key);
-    if (!entry) return undefined;
-    if (Date.now() > entry.expiresAt) {
-      this._store.delete(key);
-      return undefined;
-    }
-    return entry.value;
+  off(event, handler) {
+    this.#listeners.get(event)?.delete(handler);
   }
 
-  /**
-   * Store a value with an expiry timestamp.
-   * @param {string} key
-   * @param {any} value
-   */
-  set(key, value) {
-    this._store.set(key, {
-      value,
-      expiresAt: Date.now() + this._ttlMs,
-    });
+  emit(event, ...args) {
+    this.#listeners.get(event)?.forEach((h) => h(...args));
   }
 
-  /** Remove all entries from the cache. */
-  clear() {
-    this._store.clear();
-  }
-
-  /** @returns {number} The number of (possibly stale) entries in the store. */
-  get size() {
-    return this._store.size;
+  once(event, handler) {
+    const wrapper = (...args) => { handler(...args); this.off(event, wrapper); };
+    return this.on(event, wrapper);
   }
 }
 
 // ---------------------------------------------------------------------------
-// API client
+// Venue
 // ---------------------------------------------------------------------------
 
-class InventoryAPIClient {
-  /**
-   * Wraps fetch() with automatic retries, error normalisation, and caching.
-   * @param {string} baseUrl - Root URL for all API requests.
-   * @param {ExpiringCache} cache - Shared cache instance.
-   */
-  constructor(baseUrl, cache) {
-    this._baseUrl = baseUrl;
-    this._cache   = cache;
+class Venue {
+  #capacity;
+  #facilities;
+
+  constructor({ name, address, capacity, facilities = [] }) {
+    this.name        = name;
+    this.address     = address;
+    this.#capacity   = capacity;
+    this.#facilities = new Set(facilities);
   }
 
-  /**
-   * Perform a GET request with retry logic and response caching.
-   * @param {string} endpoint - Path appended to baseUrl (e.g. "/products").
-   * @param {Record<string, string>} [params={}] - Query string parameters.
-   * @returns {Promise<any>} Parsed JSON response body.
-   * @throws {Error} After all retry attempts are exhausted.
-   */
-  async get(endpoint, params = {}) {
-    const url       = this._buildUrl(endpoint, params);
-    const cacheKey  = url.toString();
-    const cached    = this._cache.get(cacheKey);
+  get capacity()     { return this.#capacity; }
+  get facilities()   { return [...this.#facilities]; }
 
-    if (cached !== undefined) {
-      return deepClone(cached);
-    }
+  hasFacility(name) { return this.#facilities.has(name); }
 
-    let lastError;
-    for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
-      try {
-        const response = await fetch(url, {
-          method: "GET",
-          headers: { Accept: "application/json" },
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        this._cache.set(cacheKey, data);
-        return deepClone(data);
-
-      } catch (err) {
-        lastError = err;
-        if (attempt < RETRY_ATTEMPTS) {
-          await sleep(RETRY_DELAY_MS * attempt);
-        }
-      }
-    }
-
-    throw new Error(
-      `API request failed after ${RETRY_ATTEMPTS} attempts: ${lastError.message}`
-    );
-  }
-
-  /**
-   * Submit a POST request (not cached).
-   * @param {string} endpoint
-   * @param {object} body - Request payload, serialised to JSON.
-   * @returns {Promise<any>} Parsed JSON response body.
-   */
-  async post(endpoint, body) {
-    const response = await fetch(`${this._baseUrl}${endpoint}`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`POST ${endpoint} failed (${response.status}): ${detail}`);
-    }
-
-    return response.json();
-  }
-
-  /**
-   * Build a fully qualified URL from an endpoint and query params.
-   * @param {string} endpoint
-   * @param {Record<string, string>} params
-   * @returns {URL}
-   */
-  _buildUrl(endpoint, params) {
-    const url = new URL(`${this._baseUrl}${endpoint}`);
-    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-    return url;
+  toString() {
+    return `${this.name} (cap. ${this.#capacity.toLocaleString()})`;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Product model
+// Ticket types
 // ---------------------------------------------------------------------------
 
-class Product {
-  /**
-   * @param {object} raw - Raw API response object for a single product.
-   */
-  constructor({ id, name, sku, price, stock, category, tags = [] }) {
-    this.id       = id;
-    this.name     = name;
-    this.sku      = sku;
-    this.price    = price;
-    this.stock    = stock;
-    this.category = category;
-    this.tags     = tags;
+class TicketType {
+  static #registry = new Map();
+
+  static {
+    // Static initialisation block — register default types
+    [
+      { id: "GA",  label: "General Admission", multiplier: 1.0 },
+      { id: "VIP", label: "VIP",               multiplier: 2.5 },
+      { id: "EAR", label: "Early Bird",        multiplier: 0.8 },
+    ].forEach((t) => TicketType.#registry.set(t.id, new TicketType(t)));
   }
 
-  /** @returns {boolean} True if fewer than LOW_STOCK_CUTOFF units remain. */
-  get isLowStock() {
-    return this.stock > 0 && this.stock < LOW_STOCK_CUTOFF;
+  static get(id) { return TicketType.#registry.get(id) ?? null; }
+  static all()   { return [...TicketType.#registry.values()]; }
+
+  #id; #label; #multiplier;
+
+  constructor({ id, label, multiplier }) {
+    this.#id         = id;
+    this.#label      = label;
+    this.#multiplier = multiplier;
   }
 
-  /** @returns {boolean} True if no units are available. */
-  get isOutOfStock() {
-    return this.stock <= 0;
+  get id()         { return this.#id; }
+  get label()      { return this.#label; }
+  get multiplier() { return this.#multiplier; }
+
+  priceFor(basePrice) {
+    return Math.round(basePrice * this.#multiplier * 100) / 100;
   }
 
-  /** @returns {string} Localised currency string for the price. */
-  get formattedPrice() {
-    return formatCurrency(this.price);
+  [Symbol.toPrimitive](hint) {
+    return hint === "number" ? this.#multiplier : this.#label;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Cart
+// Event
 // ---------------------------------------------------------------------------
 
-class ShoppingCart {
-  constructor() {
-    /** @type {Map<string, { product: Product, quantity: number }>} */
-    this._items = new Map();
+class Event extends EventEmitter {
+  #status        = "on_sale";
+  #soldTickets   = new Map();       // bookingId → Booking
+  #waitlist      = [];
+  #priceHistory  = [];
+
+  constructor({ title, venue, date, basePrice, maxTickets = MAX_TICKETS }) {
+    super();
+    this.id         = generateId("EVT");
+    this.title      = title;
+    this.venue      = venue instanceof Venue ? venue : new Venue(venue);
+    this.date       = date instanceof Date ? date : new Date(date);
+    this.basePrice  = basePrice;
+    this.maxTickets = clamp(maxTickets, 1, this.venue.capacity);
+    this.#priceHistory.push({ price: basePrice, at: new Date() });
   }
 
-  /**
-   * Add a product to the cart or increase its quantity.
-   * @param {Product} product - The product to add.
-   * @param {number} [quantity=1] - Number of units to add.
-   * @throws {Error} If cart is full or requested quantity exceeds stock.
-   */
-  add(product, quantity = 1) {
-    if (this._items.size >= MAX_CART_ITEMS && !this._items.has(product.id)) {
-      throw new Error(`Cart is full (max ${MAX_CART_ITEMS} distinct items).`);
+  get status()       { return this.#status; }
+  get ticketsSold()  { return this.#soldTickets.size; }
+  get ticketsLeft()  { return this.maxTickets - this.ticketsSold; }
+  get isSoldOut()    { return this.ticketsLeft <= 0; }
+  get waitlistSize() { return this.#waitlist.length; }
+
+  updateBasePrice(newPrice) {
+    if (newPrice <= 0) throw new ValidationError("basePrice", "must be positive");
+    const old = this.basePrice;
+    this.basePrice = newPrice;
+    this.#priceHistory.push({ price: newPrice, at: new Date() });
+    this.emit("priceChange", { event: this, old, new: newPrice });
+  }
+
+  _recordBooking(booking) {
+    this.#soldTickets.set(booking.id, booking);
+    if (this.isSoldOut) {
+      this.#status = SOLD_OUT_SYMBOL.toString();
+      this.emit("soldOut", this);
     }
-
-    const existing  = this._items.get(product.id);
-    const newQty    = (existing?.quantity ?? 0) + quantity;
-
-    if (newQty > product.stock) {
-      throw new Error(
-        `Cannot add ${quantity} × "${product.name}": only ${product.stock} in stock.`
-      );
-    }
-
-    this._items.set(product.id, { product, quantity: newQty });
+    this.emit("booked", booking);
   }
 
-  /**
-   * Remove all units of a product from the cart.
-   * @param {string} productId
-   */
-  remove(productId) {
-    this._items.delete(productId);
+  _cancelBooking(bookingId) {
+    const booking = this.#soldTickets.get(bookingId);
+    if (!booking) return false;
+    this.#soldTickets.delete(bookingId);
+    this.emit("cancelled", booking);
+    this._processWaitlist();
+    return true;
   }
 
-  /**
-   * Update the quantity of a product already in the cart.
-   * @param {string} productId
-   * @param {number} quantity - New desired quantity (0 removes the item).
-   */
-  updateQuantity(productId, quantity) {
-    if (quantity <= 0) {
-      this.remove(productId);
-      return;
-    }
-    const entry = this._items.get(productId);
-    if (!entry) return;
-    this._items.set(productId, { ...entry, quantity });
+  _processWaitlist() {
+    if (this.#waitlist.length === 0 || this.isSoldOut) return;
+    const next = this.#waitlist.shift();
+    this.emit("waitlistReady", next);
   }
 
-  /** Remove everything from the cart. */
-  clear() {
-    this._items.clear();
+  joinWaitlist(customer) {
+    this.#waitlist.push(customer);
+    return this.#waitlist.length;
   }
 
-  /** @returns {number} Total number of individual units across all items. */
-  get totalUnits() {
-    return [...this._items.values()].reduce((sum, { quantity }) => sum + quantity, 0);
+  *[Symbol.iterator]() {
+    yield* this.#soldTickets.values();
   }
 
-  /** @returns {number} Raw numeric total before tax. */
-  get subtotal() {
-    return [...this._items.values()].reduce(
-      (sum, { product, quantity }) => sum + product.price * quantity,
-      0
-    );
-  }
+  get priceHistory() { return [...this.#priceHistory]; }
 
-  /** @returns {string} Formatted subtotal string. */
-  get formattedSubtotal() {
-    return formatCurrency(this.subtotal);
-  }
-
-  /**
-   * Return a plain-object snapshot of the cart suitable for an API payload.
-   * @returns {{ items: Array<{ sku: string, quantity: number }>, total: number }}
-   */
-  toOrderPayload() {
+  toJSON() {
     return {
-      items: [...this._items.values()].map(({ product, quantity }) => ({
-        sku: product.sku,
-        quantity,
-      })),
-      total: this.subtotal,
+      id:          this.id,
+      title:       this.title,
+      venue:       this.venue.name,
+      date:        this.date.toISOString(),
+      basePrice:   this.basePrice,
+      ticketsSold: this.ticketsSold,
+      ticketsLeft: this.ticketsLeft,
+      status:      this.status,
     };
   }
 }
 
 // ---------------------------------------------------------------------------
-// Inventory store (facade)
+// Booking
 // ---------------------------------------------------------------------------
 
-class InventoryStore {
-  /**
-   * High-level facade used by UI code to browse products and manage a cart.
-   * @param {InventoryAPIClient} client
-   */
-  constructor(client) {
-    this._client  = client;
-    this._cart    = new ShoppingCart();
-    /** @type {Product[]} */
-    this._catalog = [];
+class Booking {
+  #paid      = false;
+  #refunded  = false;
+  #createdAt = new Date();
+
+  constructor({ event, customer, ticketType, quantity = 1 }) {
+    this.id         = generateId("BKG");
+    this.event      = event;
+    this.customer   = customer;
+    this.ticketType = ticketType instanceof TicketType
+      ? ticketType
+      : TicketType.get(ticketType) ?? TicketType.get("GA");
+    this.quantity   = quantity;
+    this.unitPrice  = this.ticketType.priceFor(event.basePrice);
   }
 
-  /**
-   * Fetch the full product catalogue from the API and populate _catalog.
-   * @returns {Promise<Product[]>}
-   */
-  async loadCatalog() {
-    const raw = await this._client.get("/products");
-    this._catalog = raw.map((item) => new Product(item));
-    return this._catalog;
+  get createdAt()    { return this.#createdAt; }
+  get isPaid()       { return this.#paid; }
+  get isRefunded()   { return this.#refunded; }
+  get subtotal()     { return Math.round(this.unitPrice * this.quantity * 100) / 100; }
+  get bookingFee()   { return Math.round(this.subtotal * BOOKING_FEE_PCT * 100) / 100; }
+  get total()        { return Math.round((this.subtotal + this.bookingFee) * 100) / 100; }
+
+  get isRefundEligible() {
+    return this.#paid && !this.#refunded &&
+      (Date.now() - this.#createdAt.getTime()) < REFUND_WINDOW_MS;
   }
 
-  /**
-   * Filter the in-memory catalogue by keyword and optional category.
-   * @param {string} query - Substring matched against name, SKU, and tags.
-   * @param {string | null} [category=null] - Exact category match, or null.
-   * @returns {Product[]}
-   */
-  search(query, category = null) {
-    const term = query.toLowerCase().trim();
-    return this._catalog.filter((p) => {
-      const matchesQuery =
-        !term ||
-        p.name.toLowerCase().includes(term) ||
-        p.sku.toLowerCase().includes(term) ||
-        p.tags.some((t) => t.toLowerCase().includes(term));
+  markPaid() {
+    if (this.#paid) throw new BookingError("Already paid.", "ERR_ALREADY_PAID");
+    this.#paid = true;
+    return this;
+  }
 
-      const matchesCategory = !category || p.category === category;
-      return matchesQuery && matchesCategory;
+  markRefunded() {
+    if (!this.isRefundEligible) throw new RefundError("Refund window closed.", "ERR_REFUND_WINDOW");
+    this.#refunded = true;
+    return this;
+  }
+
+  toReceipt() {
+    const lines = [
+      `BOOKING CONFIRMATION`,
+      `${"─".repeat(40)}`,
+      `Ref       : ${this.id}`,
+      `Event     : ${this.event.title}`,
+      `Date      : ${formatDate(this.event.date)}`,
+      `Venue     : ${this.event.venue}`,
+      `Ticket    : ${this.ticketType.label} × ${this.quantity}`,
+      `Unit price: ${formatCurrency(this.unitPrice)}`,
+      `Subtotal  : ${formatCurrency(this.subtotal)}`,
+      `Booking   : ${formatCurrency(this.bookingFee)}`,
+      `${"═".repeat(40)}`,
+      `TOTAL     : ${formatCurrency(this.total)}`,
+      `Status    : ${this.isPaid ? "PAID" : "AWAITING PAYMENT"}`,
+    ];
+    return lines.join("\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Booking engine — Proxy-guarded inventory
+// ---------------------------------------------------------------------------
+
+class BookingEngine {
+  #events      = new Map();
+  #bookings    = new Map();
+  #weakCustomer = new WeakMap();
+
+  constructor() {
+    // Proxy wraps the engine so unknown method calls are caught
+    return new Proxy(this, {
+      get(target, prop) {
+        if (!(prop in target) && typeof prop === "string") {
+          throw new AppError(`Unknown method: BookingEngine.${prop}`, "ERR_API");
+        }
+        return Reflect.get(target, prop);
+      },
     });
   }
 
-  /**
-   * Return all products that are running low or out of stock.
-   * @returns {Product[]}
-   */
-  getLowStockProducts() {
-    return this._catalog.filter((p) => p.isLowStock || p.isOutOfStock);
+  registerEvent(event) {
+    if (!(event instanceof Event)) throw new ValidationError("event", "must be an Event instance");
+    this.#events.set(event.id, event);
+    return event;
   }
 
-  /** @returns {ShoppingCart} The active shopping cart. */
-  get cart() {
-    return this._cart;
+  getEvent(id) {
+    return this.#events.get(id) ?? null;
   }
 
-  /**
-   * Submit the current cart as an order and clear it on success.
-   * @returns {Promise<{ orderId: string, estimatedDelivery: string }>}
-   */
-  async checkout() {
-    if (this._cart.totalUnits === 0) {
-      throw new Error("Cannot checkout an empty cart.");
+  book({ eventId, customer, ticketTypeId = "GA", quantity = 1 }) {
+    const event = this.#events.get(eventId);
+    if (!event) throw new BookingError(`Event ${eventId} not found.`, "ERR_NOT_FOUND");
+    if (event.isSoldOut) throw new SoldOutError(event.title);
+    if (quantity > event.ticketsLeft) {
+      throw new BookingError(
+        `Only ${event.ticketsLeft} ticket(s) left.`, "ERR_PARTIAL_STOCK"
+      );
     }
 
-    const payload = this._cart.toOrderPayload();
-    const result  = await this._client.post("/orders", payload);
-    this._cart.clear();
-    return result;
+    const ticketType = TicketType.get(ticketTypeId);
+    const booking    = new Booking({ event, customer, ticketType, quantity });
+
+    booking.markPaid();
+    event._recordBooking(booking);
+    this.#bookings.set(booking.id, booking);
+    this.#weakCustomer.set(customer, booking.id);
+
+    return booking;
+  }
+
+  cancel(bookingId) {
+    const booking = this.#bookings.get(bookingId);
+    if (!booking) throw new BookingError(`Booking ${bookingId} not found.`);
+    booking.markRefunded();
+    booking.event._cancelBooking(bookingId);
+    return true;
+  }
+
+  // Async batch import using a generator
+  async *importEvents(rawList) {
+    for (const raw of rawList) {
+      await sleep(10);
+      const event = new Event(raw);
+      this.registerEvent(event);
+      yield event;
+    }
+  }
+
+  // Summarise all bookings using array destructuring and reduce
+  summary() {
+    const all = [...this.#bookings.values()];
+    const { total, revenue } = all.reduce(
+      ({ total, revenue }, b) => ({
+        total:   total + 1,
+        revenue: revenue + (b.isPaid ? b.total : 0),
+      }),
+      { total: 0, revenue: 0 }
+    );
+    return { bookingCount: total, totalRevenue: revenue };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Async report generator
+// ---------------------------------------------------------------------------
+
+async function* generateDailyReport(engine, days = 7) {
+  for (let i = 0; i < days; i++) {
+    await sleep(5);
+    const { bookingCount, totalRevenue } = engine.summary();
+    yield {
+      day:          i + 1,
+      bookingCount,
+      totalRevenue: formatCurrency(totalRevenue),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline helper (simulated |> operator)
+// ---------------------------------------------------------------------------
+
+const pipe = (...fns) => (x) => fns.reduce((v, f) => f(v), x);
+
+const normaliseTitle  = (s) => s.trim().toLowerCase().replace(/\s+/g, "-");
+const addTimestamp    = (s) => `${s}-${Date.now()}`;
+const toUpperSlug     = (s) => s.toUpperCase();
+
+const makeSlug = pipe(normaliseTitle, addTimestamp, toUpperSlug);
 
 // ---------------------------------------------------------------------------
 // Bootstrap / demo
 // ---------------------------------------------------------------------------
 
-async function bootstrap() {
-  const cache  = new ExpiringCache(CACHE_TTL_MS);
-  const client = new InventoryAPIClient(API_BASE_URL, cache);
-  const store  = new InventoryStore(client);
+async function main() {
+  console.log(`Ticketing Platform v${APP_VERSION}\n`);
 
-  try {
-    console.log("Loading catalogue...");
-    const products = await store.loadCatalog();
-    console.log(`Loaded ${products.length} products.`);
+  const engine = new BookingEngine();
 
-    const results = store.search("widget", "hardware");
-    console.log(`Search returned ${results.length} result(s).`);
+  // Batch import events
+  const rawEvents = [
+    {
+      title:      "Jazz Under the Stars",
+      venue:      { name: "Roundhouse",    address: "Chalk Farm Rd", capacity: 3300 },
+      date:       new Date(Date.now() + 30 * 864e5),
+      basePrice:  45,
+      maxTickets: 200,
+    },
+    {
+      title:      "Tech Summit 2025",
+      venue:      { name: "ExCeL London",  address: "Royal Docks",  capacity: 5000 },
+      date:       new Date(Date.now() + 60 * 864e5),
+      basePrice:  299,
+      maxTickets: 150,
+    },
+  ];
 
-    const [first] = results;
-    if (first && !first.isOutOfStock) {
-      store.cart.add(first, 2);
-      console.log(`Cart subtotal: ${store.cart.formattedSubtotal}`);
-    }
-
-    const lowStock = store.getLowStockProducts();
-    if (lowStock.length > 0) {
-      console.warn(`Low-stock alert: ${lowStock.map((p) => p.name).join(", ")}`);
-    }
-
-  } catch (err) {
-    console.error("Inventory error:", err.message);
+  const importedEvents = [];
+  for await (const event of engine.importEvents(rawEvents)) {
+    console.log(`Registered: ${event.title} [${event.id}]`);
+    importedEvents.push(event);
   }
+
+  const [jazzEvent, techEvent] = importedEvents;
+
+  // Subscribe to events
+  const unsubscribe = jazzEvent.on("booked", (booking) => {
+    console.log(`Booked: ${booking.id} — ${formatCurrency(booking.total)}`);
+  });
+
+  jazzEvent.once("soldOut", (evt) => {
+    console.warn(`SOLD OUT: ${evt.title}`);
+  });
+
+  // Make bookings
+  const alice = { name: "Alice Chen",  email: "alice@example.com" };
+  const bob   = { name: "Bob Okafor",  email: "bob@example.com" };
+
+  const b1 = engine.book({ eventId: jazzEvent.id, customer: alice, ticketTypeId: "VIP",  quantity: 2 });
+  const b2 = engine.book({ eventId: jazzEvent.id, customer: bob,   ticketTypeId: "GA",   quantity: 3 });
+  const b3 = engine.book({ eventId: techEvent.id, customer: alice, ticketTypeId: "EAR",  quantity: 1 });
+
+  console.log("\n" + b1.toReceipt());
+
+  // Price history after update
+  jazzEvent.updateBasePrice(55);
+  console.log("\nPrice history:", jazzEvent.priceHistory.map(h =>
+    `${formatCurrency(h.price)} @ ${h.at.toISOString()}`
+  ));
+
+  // Iterate over all bookings on an event
+  console.log("\nJazz bookings:");
+  for (const booking of jazzEvent) {
+    console.log(`  ${booking.id} — ${booking.customer.name} — ${formatCurrency(booking.total)}`);
+  }
+
+  // Summary
+  const { bookingCount, totalRevenue } = engine.summary();
+  console.log(`\nSummary: ${bookingCount} bookings, ${formatCurrency(totalRevenue)} revenue`);
+
+  // Slug pipeline
+  console.log("\nEvent slug:", makeSlug(jazzEvent.title));
+
+  // Memoized price computation
+  const memoPrice = memoize((base, mult) => base * mult);
+  console.log("Memoized:", memoPrice(45, 2.5), memoPrice(45, 2.5));
+
+  // Debounced search (demo only)
+  const debouncedSearch = debounce((q) => console.log("Search:", q), 300);
+  debouncedSearch("jazz");
+
+  // Cancel booking
+  try {
+    engine.cancel(b2.id);
+    console.log(`\nCancelled ${b2.id} OK`);
+  } catch (err) {
+    console.error(err.message);
+  }
+
+  // Async report
+  console.log("\nDaily report preview:");
+  let count = 0;
+  for await (const row of generateDailyReport(engine, 3)) {
+    console.log(`  Day ${row.day}: ${row.bookingCount} bookings, ${row.totalRevenue}`);
+    if (++count >= 3) break;
+  }
+
+  // Safe tagged template
+  const userInput = "<script>alert('xss')</script>";
+  console.log("\nSanitised:", safe`Hello ${userInput}!`);
+
+  // Cleanup
+  unsubscribe();
 }
 
-bootstrap();
+main().catch(console.error);

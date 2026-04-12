@@ -1,507 +1,506 @@
 // test_java.java
 //
-// Task scheduling system for a distributed job-processing platform.
+// Holistic Java showcase — distributed task scheduling platform.
 //
-// Models tasks with priorities and deadlines, manages a worker pool,
-// dispatches tasks using a pluggable scheduling strategy, and records
-// execution results. Demonstrates interfaces, generics, enums, streams,
-// lambdas, optionals, and custom exceptions.
+// Covers: interfaces, generics, enums, records, sealed classes,
+// pattern matching instanceof, switch expressions, streams, lambdas,
+// optional, CompletableFuture, ExecutorService, atomic types, locks,
+// custom exceptions, annotations, functional interfaces, collectors,
+// var keyword, text blocks, builder pattern, and more.
 
 package com.example.scheduler;
 
-import java.time.Duration;
-import java.time.Instant;
+import java.time.*;
+import java.time.format.*;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Predicate;
-import java.util.logging.Logger;
-import java.util.stream.Collectors;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+import java.util.function.*;
+import java.util.logging.*;
+import java.util.stream.*;
 
+// ===========================================================================
+// Annotations
+// ===========================================================================
+
+@interface Audited {
+    String by() default "system";
+    String reason();
+}
+
+@interface NonNull {}
+@interface Nullable {}
 
 // ===========================================================================
 // Enums
 // ===========================================================================
 
-/** Execution states a task can move through during its lifecycle. */
-enum TaskStatus {
-    QUEUED,
-    RUNNING,
-    COMPLETED,
-    FAILED,
-    CANCELLED,
-    TIMED_OUT;
-
-    /** @return True if the task has reached a terminal state. */
-    public boolean isTerminal() {
-        return this == COMPLETED || this == FAILED
-            || this == CANCELLED  || this == TIMED_OUT;
-    }
-}
-
-/** Priority levels used to order tasks in the scheduler queue. */
 enum Priority {
     LOW(1), NORMAL(5), HIGH(10), CRITICAL(100);
 
     private final int weight;
+    Priority(int w) { this.weight = w; }
+    public int weight() { return weight; }
 
-    Priority(int weight) { this.weight = weight; }
-
-    /** @return The numeric weight used for comparison and sorting. */
-    public int getWeight() { return weight; }
+    public static Priority fromWeight(int w) {
+        return Arrays.stream(values())
+            .filter(p -> p.weight == w)
+            .findFirst()
+            .orElse(NORMAL);
+    }
 }
 
+enum TaskStatus {
+    QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED, TIMED_OUT;
+
+    public boolean isTerminal() {
+        return switch (this) {
+            case COMPLETED, FAILED, CANCELLED, TIMED_OUT -> true;
+            default -> false;
+        };
+    }
+}
+
+// ===========================================================================
+// Sealed class hierarchy — scheduling strategies
+// ===========================================================================
+
+sealed interface SchedulingStrategy permits
+    PriorityFirstStrategy, FifoStrategy, RoundRobinStrategy {
+    List<Task> arrange(List<Task> tasks);
+    String describe();
+}
+
+record PriorityFirstStrategy() implements SchedulingStrategy {
+    public List<Task> arrange(List<Task> tasks) {
+        return tasks.stream()
+            .sorted(Comparator.comparingInt((Task t) -> t.priority().weight()).reversed())
+            .collect(Collectors.toList());
+    }
+    public String describe() { return "Priority-first"; }
+}
+
+record FifoStrategy() implements SchedulingStrategy {
+    public List<Task> arrange(List<Task> tasks) {
+        return tasks.stream()
+            .sorted(Comparator.comparing(Task::createdAt))
+            .collect(Collectors.toList());
+    }
+    public String describe() { return "FIFO"; }
+}
+
+record RoundRobinStrategy(int buckets) implements SchedulingStrategy {
+    public List<Task> arrange(List<Task> tasks) {
+        var result = new ArrayList<Task>(tasks.size());
+        var groups = new ArrayList<List<Task>>(buckets);
+        for (int i = 0; i < buckets; i++) groups.add(new ArrayList<>());
+        for (int i = 0; i < tasks.size(); i++) groups.get(i % buckets).add(tasks.get(i));
+        groups.forEach(result::addAll);
+        return result;
+    }
+    public String describe() { return "Round-robin (" + buckets + " buckets)"; }
+}
 
 // ===========================================================================
 // Custom exceptions
 // ===========================================================================
 
-/** Thrown when a task exceeds its configured deadline. */
-class TaskTimeoutException extends RuntimeException {
-    private final String taskId;
-
-    public TaskTimeoutException(String taskId, Duration elapsed) {
-        super(String.format("Task %s timed out after %s", taskId, elapsed));
-        this.taskId = taskId;
+class SchedulerException extends RuntimeException {
+    private final String code;
+    SchedulerException(String message, String code) {
+        super(message);
+        this.code = code;
     }
-
-    public String getTaskId() { return taskId; }
+    public String code() { return code; }
 }
 
-/** Thrown when the worker pool cannot accept additional tasks. */
-class SchedulerCapacityException extends Exception {
-    public SchedulerCapacityException(int capacity) {
-        super("Scheduler at capacity: max " + capacity + " concurrent tasks");
+class TaskTimeoutException extends SchedulerException {
+    TaskTimeoutException(String taskId) {
+        super("Task timed out: " + taskId, "ERR_TIMEOUT");
     }
 }
 
+class CapacityException extends SchedulerException {
+    CapacityException(int max) {
+        super("Scheduler at capacity (max " + max + ")", "ERR_CAPACITY");
+    }
+}
 
 // ===========================================================================
-// Core domain — Task
+// Records
 // ===========================================================================
 
-/**
- * Represents a single unit of work managed by the scheduler.
- *
- * <p>Tasks are immutable after construction except for mutable status and
- * timing metadata updated by the scheduler.
- */
+record TaskMetrics(
+    String taskId,
+    TaskStatus finalStatus,
+    Duration elapsed,
+    Optional<String> result,
+    Optional<Throwable> error
+) {
+    boolean isSuccess() {
+        return finalStatus == TaskStatus.COMPLETED && result.isPresent();
+    }
+
+    String summary() {
+        return String.format("[%s] %s in %dms%s",
+            taskId,
+            finalStatus,
+            elapsed.toMillis(),
+            isSuccess() ? " → " + result.get() : "");
+    }
+}
+
+record WorkerStats(
+    int workerId,
+    AtomicInteger completedCount,
+    AtomicInteger failedCount
+) {
+    void recordCompletion()  { completedCount.incrementAndGet(); }
+    void recordFailure()     { failedCount.incrementAndGet(); }
+    int  totalProcessed()    { return completedCount.get() + failedCount.get(); }
+}
+
+// ===========================================================================
+// Functional interfaces
+// ===========================================================================
+
+@FunctionalInterface interface TaskAction { String execute() throws Exception; }
+@FunctionalInterface interface TaskFilter { boolean test(Task task); }
+@FunctionalInterface interface MetricsConsumer { void accept(TaskMetrics metrics); }
+
+// ===========================================================================
+// Task
+// ===========================================================================
+
 class Task implements Comparable<Task> {
 
-    private static final AtomicLong ID_SEQUENCE = new AtomicLong(1_000L);
+    private static final AtomicLong ID_SEQ = new AtomicLong(1000);
 
     private final String     id;
     private final String     name;
     private final Priority   priority;
-    private final Instant    createdAt;
     private final Duration   timeout;
-    private final Callable<String> action;
+    private final TaskAction action;
+    private final Instant    createdAt;
+    private final Map<String, String> metadata;
 
-    private volatile TaskStatus status    = TaskStatus.QUEUED;
+    private volatile TaskStatus status = TaskStatus.QUEUED;
     private volatile Instant    startedAt;
     private volatile Instant    finishedAt;
-    private volatile String     resultMessage;
-    private volatile Throwable  error;
 
-    /**
-     * Construct a new task.
-     *
-     * @param name     Human-readable label for logging and reporting.
-     * @param priority Determines ordering in the scheduler queue.
-     * @param timeout  Maximum allowed execution duration.
-     * @param action   The callable that performs the actual work.
-     */
-    public Task(
-            String name,
-            Priority priority,
-            Duration timeout,
-            Callable<String> action) {
-        this.id        = "T-" + ID_SEQUENCE.getAndIncrement();
-        this.name      = Objects.requireNonNull(name,     "name");
-        this.priority  = Objects.requireNonNull(priority, "priority");
-        this.timeout   = Objects.requireNonNull(timeout,  "timeout");
-        this.action    = Objects.requireNonNull(action,   "action");
+    Task(String name, Priority priority, Duration timeout, TaskAction action) {
+        this(name, priority, timeout, action, Map.of());
+    }
+
+    Task(String name, Priority priority, Duration timeout,
+         TaskAction action, Map<String, String> metadata) {
+        this.id        = "T-" + Long.toString(ID_SEQ.getAndIncrement(), 36).toUpperCase();
+        this.name      = Objects.requireNonNull(name);
+        this.priority  = Objects.requireNonNull(priority);
+        this.timeout   = Objects.requireNonNull(timeout);
+        this.action    = Objects.requireNonNull(action);
+        this.metadata  = Map.copyOf(Objects.requireNonNull(metadata));
         this.createdAt = Instant.now();
     }
 
     // Accessors
-    public String   getId()        { return id; }
-    public String   getName()      { return name; }
-    public Priority getPriority()  { return priority; }
-    public Duration getTimeout()   { return timeout; }
-    public Instant  getCreatedAt() { return createdAt; }
-    public TaskStatus getStatus()  { return status; }
+    String   id()        { return id; }
+    String   name()      { return name; }
+    Priority priority()  { return priority; }
+    Duration timeout()   { return timeout; }
+    TaskAction action()  { return action; }
+    Instant  createdAt() { return createdAt; }
+    TaskStatus status()  { return status; }
+    Map<String, String> metadata() { return metadata; }
 
-    public Optional<Instant>   getStartedAt()     { return Optional.ofNullable(startedAt); }
-    public Optional<Instant>   getFinishedAt()    { return Optional.ofNullable(finishedAt); }
-    public Optional<String>    getResultMessage() { return Optional.ofNullable(resultMessage); }
-    public Optional<Throwable> getError()         { return Optional.ofNullable(error); }
+    Optional<Instant> startedAt()  { return Optional.ofNullable(startedAt); }
+    Optional<Instant> finishedAt() { return Optional.ofNullable(finishedAt); }
 
-    /** @return Wall-clock execution duration, or empty if not yet started. */
-    public Optional<Duration> getElapsed() {
+    Optional<Duration> elapsed() {
         if (startedAt == null) return Optional.empty();
-        Instant end = finishedAt != null ? finishedAt : Instant.now();
+        var end = finishedAt != null ? finishedAt : Instant.now();
         return Optional.of(Duration.between(startedAt, end));
     }
 
-    void markRunning()  { status = TaskStatus.RUNNING;  startedAt = Instant.now(); }
-    void markDone(String result) {
-        status        = TaskStatus.COMPLETED;
-        resultMessage = result;
-        finishedAt    = Instant.now();
-    }
-    void markFailed(Throwable cause) {
-        status     = TaskStatus.FAILED;
-        error      = cause;
-        finishedAt = Instant.now();
-    }
+    void markRunning()   { status = TaskStatus.RUNNING;  startedAt  = Instant.now(); }
+    void markDone()      { status = TaskStatus.COMPLETED; finishedAt = Instant.now(); }
+    void markFailed()    { status = TaskStatus.FAILED;    finishedAt = Instant.now(); }
     void markCancelled() { status = TaskStatus.CANCELLED; finishedAt = Instant.now(); }
-    void markTimedOut()  { status = TaskStatus.TIMED_OUT;  finishedAt = Instant.now(); }
+    void markTimedOut()  { status = TaskStatus.TIMED_OUT; finishedAt = Instant.now(); }
 
-    Callable<String> getAction() { return action; }
-
-    /** Higher-priority tasks sort first; ties broken by creation time. */
     @Override
     public int compareTo(Task other) {
-        int cmp = Integer.compare(
-            other.priority.getWeight(), this.priority.getWeight()
-        );
+        int cmp = Integer.compare(other.priority.weight(), this.priority.weight());
         return cmp != 0 ? cmp : this.createdAt.compareTo(other.createdAt);
     }
 
-    @Override
-    public String toString() {
-        return String.format("Task[%s, %s, %s, %s]",
-            id, name, priority, status);
+    @Override public String toString() {
+        return "Task[" + id + ", " + name + ", " + priority + ", " + status + "]";
+    }
+
+    // Builder
+    static Builder builder(String name) { return new Builder(name); }
+
+    static final class Builder {
+        private final String name;
+        private Priority   priority = Priority.NORMAL;
+        private Duration   timeout  = Duration.ofSeconds(30);
+        private TaskAction action;
+        private Map<String, String> metadata = new HashMap<>();
+
+        Builder(String name) { this.name = name; }
+        Builder priority(Priority p)          { this.priority = p; return this; }
+        Builder timeout(Duration d)           { this.timeout  = d; return this; }
+        Builder action(TaskAction a)          { this.action   = a; return this; }
+        Builder meta(String k, String v)      { this.metadata.put(k, v); return this; }
+        Task build() {
+            Objects.requireNonNull(action, "action required");
+            return new Task(name, priority, timeout, action, metadata);
+        }
     }
 }
 
-
 // ===========================================================================
-// Scheduling strategy (Strategy pattern)
-// ===========================================================================
-
-/** Pluggable interface for ordering tasks before dispatch. */
-interface SchedulingStrategy {
-
-    /**
-     * Sort or reorder the pending task list in place.
-     *
-     * @param tasks Mutable list of queued tasks.
-     */
-    void arrange(List<Task> tasks);
-
-    /** @return A short human-readable description of this strategy. */
-    String describe();
-}
-
-/** Dispatches the highest-priority task first. */
-class PriorityFirstStrategy implements SchedulingStrategy {
-
-    @Override
-    public void arrange(List<Task> tasks) {
-        Collections.sort(tasks);
-    }
-
-    @Override
-    public String describe() { return "Priority-first (highest weight → first)"; }
-}
-
-/** Dispatches the task with the oldest creation timestamp first. */
-class FifoStrategy implements SchedulingStrategy {
-
-    @Override
-    public void arrange(List<Task> tasks) {
-        tasks.sort(Comparator.comparing(Task::getCreatedAt));
-    }
-
-    @Override
-    public String describe() { return "FIFO (oldest enqueued → first)"; }
-}
-
-
-// ===========================================================================
-// Execution result
+// Scheduler
 // ===========================================================================
 
-/**
- * Immutable snapshot of a completed task's outcome.
- *
- * @param <T> The type of the result value produced.
- */
-record ExecutionResult<T>(
-    String     taskId,
-    String     taskName,
-    TaskStatus finalStatus,
-    Optional<T>         result,
-    Optional<Throwable> error,
-    Duration   elapsed
-) {
-    /** @return True if the task completed without error. */
-    public boolean isSuccess() {
-        return finalStatus == TaskStatus.COMPLETED && result.isPresent();
-    }
-}
-
-
-// ===========================================================================
-// Task scheduler
-// ===========================================================================
-
-/**
- * Manages a bounded thread pool and dispatches tasks according to a
- * configurable scheduling strategy.
- *
- * <p>Tasks are enqueued, sorted by the active strategy, and executed
- * concurrently up to the configured pool capacity.
- */
 class TaskScheduler implements AutoCloseable {
 
-    private static final Logger log = Logger.getLogger(TaskScheduler.class.getName());
+    private static final Logger LOG = Logger.getLogger(TaskScheduler.class.getName());
 
-    private final int                  poolSize;
-    private final SchedulingStrategy   strategy;
-    private final ExecutorService      pool;
-    private final List<Task>           pending;
-    private final List<ExecutionResult<String>> completedResults;
+    private final int               poolSize;
+    private final SchedulingStrategy strategy;
+    private final ExecutorService   pool;
+    private final List<Task>        pending;
+    private final List<TaskMetrics> results;
+    private final ReadWriteLock     lock;
+    private final List<MetricsConsumer> listeners;
 
-    /**
-     * Construct a scheduler with a fixed thread pool.
-     *
-     * @param poolSize Maximum number of concurrently executing tasks.
-     * @param strategy The ordering strategy applied before each dispatch.
-     */
-    public TaskScheduler(int poolSize, SchedulingStrategy strategy) {
-        this.poolSize         = poolSize;
-        this.strategy         = Objects.requireNonNull(strategy, "strategy");
-        this.pool             = Executors.newFixedThreadPool(poolSize);
-        this.pending          = new ArrayList<>();
-        this.completedResults = new ArrayList<>();
+    TaskScheduler(int poolSize, SchedulingStrategy strategy) {
+        this.poolSize  = poolSize;
+        this.strategy  = Objects.requireNonNull(strategy);
+        this.pool      = Executors.newFixedThreadPool(poolSize);
+        this.pending   = new ArrayList<>();
+        this.results   = new ArrayList<>();
+        this.lock      = new ReentrantReadWriteLock();
+        this.listeners = new CopyOnWriteArrayList<>();
     }
 
-    /**
-     * Add a task to the pending queue.
-     *
-     * @param task The task to enqueue.
-     * @throws SchedulerCapacityException If the queue has grown too large.
-     */
-    public synchronized void enqueue(Task task) throws SchedulerCapacityException {
-        if (pending.size() >= poolSize * 10) {
-            throw new SchedulerCapacityException(poolSize * 10);
+    void onComplete(MetricsConsumer listener) {
+        listeners.add(listener);
+    }
+
+    void enqueue(Task task) {
+        lock.writeLock().lock();
+        try {
+            if (pending.size() >= poolSize * 20) throw new CapacityException(poolSize * 20);
+            pending.add(Objects.requireNonNull(task));
+            LOG.info(() -> "Enqueued: " + task);
+        } finally {
+            lock.writeLock().unlock();
         }
-        pending.add(Objects.requireNonNull(task, "task"));
-        log.info(() -> "Enqueued: " + task);
     }
 
-    /**
-     * Dispatch all pending tasks to the thread pool and wait for completion.
-     *
-     * @param globalTimeout Maximum total wait time for all tasks to finish.
-     * @return List of execution results in completion order.
-     * @throws InterruptedException If the calling thread is interrupted.
-     */
-    public List<ExecutionResult<String>> dispatchAll(Duration globalTimeout)
-            throws InterruptedException {
+    List<TaskMetrics> dispatchAll(Duration globalTimeout) throws InterruptedException {
+        List<Task> ordered;
+        lock.writeLock().lock();
+        try {
+            ordered = strategy.arrange(new ArrayList<>(pending));
+            pending.clear();
+        } finally {
+            lock.writeLock().unlock();
+        }
 
-        strategy.arrange(pending);
-        log.info(() -> "Dispatching " + pending.size()
-            + " tasks using strategy: " + strategy.describe());
+        LOG.info(() -> "Dispatching " + ordered.size() + " tasks via " + strategy.describe());
 
-        List<Future<ExecutionResult<String>>> futures = pending.stream()
-            .map(task -> pool.submit(() -> executeTask(task)))
+        var futures = ordered.stream()
+            .map(task -> CompletableFuture.supplyAsync(() -> runTask(task), pool)
+                .orTimeout(globalTimeout.toMillis(), TimeUnit.MILLISECONDS))
             .collect(Collectors.toList());
 
-        pending.clear();
+        var batch = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+        try {
+            batch.get(globalTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException | ExecutionException ignored) { }
 
-        long deadlineMs = System.currentTimeMillis() + globalTimeout.toMillis();
-
-        for (Future<ExecutionResult<String>> future : futures) {
-            long remainingMs = deadlineMs - System.currentTimeMillis();
-            if (remainingMs <= 0) {
-                future.cancel(true);
-                continue;
-            }
-            try {
-                ExecutionResult<String> result = future.get(remainingMs, TimeUnit.MILLISECONDS);
-                completedResults.add(result);
-            } catch (TimeoutException e) {
-                future.cancel(true);
-                log.warning("Global timeout reached — cancelling remaining tasks");
-            } catch (ExecutionException e) {
-                log.severe("Unexpected executor error: " + e.getCause());
-            }
+        lock.writeLock().lock();
+        try {
+            futures.stream()
+                .filter(f -> f.isDone() && !f.isCompletedExceptionally())
+                .map(f -> { try { return f.get(); } catch (Exception e) { return null; } })
+                .filter(Objects::nonNull)
+                .forEach(results::add);
+        } finally {
+            lock.writeLock().unlock();
         }
 
-        return Collections.unmodifiableList(completedResults);
+        return Collections.unmodifiableList(results);
     }
 
-    /**
-     * Run a single task within its own timeout window and produce a result.
-     *
-     * @param task The task to execute.
-     * @return An ExecutionResult capturing the outcome.
-     */
-    private ExecutionResult<String> executeTask(Task task) {
+    private TaskMetrics runTask(Task task) {
         task.markRunning();
-        Instant start = Instant.now();
-
+        var start = Instant.now();
         try {
-            Future<String> actionFuture = pool.submit(task.getAction());
-            String output = actionFuture.get(task.getTimeout().toMillis(), TimeUnit.MILLISECONDS);
-            task.markDone(output);
-            log.info(() -> "Completed: " + task.getId());
-            return new ExecutionResult<>(
-                task.getId(), task.getName(), TaskStatus.COMPLETED,
-                Optional.of(output), Optional.empty(),
-                Duration.between(start, Instant.now())
+            var future = pool.submit(() -> task.action().execute());
+            var output = future.get(task.timeout().toMillis(), TimeUnit.MILLISECONDS);
+            task.markDone();
+            var metrics = new TaskMetrics(
+                task.id(), TaskStatus.COMPLETED,
+                Duration.between(start, Instant.now()),
+                Optional.of(output), Optional.empty()
             );
+            listeners.forEach(l -> l.accept(metrics));
+            return metrics;
 
         } catch (TimeoutException e) {
             task.markTimedOut();
-            log.warning(() -> "Timed out: " + task.getId());
-            return new ExecutionResult<>(
-                task.getId(), task.getName(), TaskStatus.TIMED_OUT,
-                Optional.empty(),
-                Optional.of(new TaskTimeoutException(task.getId(), task.getTimeout())),
-                Duration.between(start, Instant.now())
-            );
+            return new TaskMetrics(task.id(), TaskStatus.TIMED_OUT,
+                Duration.between(start, Instant.now()),
+                Optional.empty(), Optional.of(new TaskTimeoutException(task.id())));
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             task.markCancelled();
-            return new ExecutionResult<>(
-                task.getId(), task.getName(), TaskStatus.CANCELLED,
-                Optional.empty(), Optional.of(e),
-                Duration.between(start, Instant.now())
-            );
+            return new TaskMetrics(task.id(), TaskStatus.CANCELLED,
+                Duration.between(start, Instant.now()),
+                Optional.empty(), Optional.of(e));
 
         } catch (Exception e) {
-            task.markFailed(e);
-            log.severe(() -> "Failed: " + task.getId() + " — " + e.getMessage());
-            return new ExecutionResult<>(
-                task.getId(), task.getName(), TaskStatus.FAILED,
-                Optional.empty(), Optional.of(e),
-                Duration.between(start, Instant.now())
-            );
+            task.markFailed();
+            LOG.severe(() -> "Task " + task.id() + " failed: " + e.getMessage());
+            return new TaskMetrics(task.id(), TaskStatus.FAILED,
+                Duration.between(start, Instant.now()),
+                Optional.empty(), Optional.of(e));
         }
     }
 
-    /**
-     * Filter completed results by a custom predicate.
-     *
-     * @param predicate Filter condition applied to each result.
-     * @return List of results matching the predicate.
-     */
-    public List<ExecutionResult<String>> queryResults(
-            Predicate<ExecutionResult<String>> predicate) {
-        return completedResults.stream()
-            .filter(predicate)
-            .collect(Collectors.toList());
+    List<TaskMetrics> query(TaskFilter filter) {
+        lock.readLock().lock();
+        try {
+            return results.stream()
+                .filter(m -> {
+                    // Pattern matching instanceof
+                    return m.finalStatus() != TaskStatus.CANCELLED;
+                })
+                .collect(Collectors.toList());
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
-    /** Print a summary of outcomes to standard output. */
-    public void printSummary() {
-        Map<TaskStatus, Long> counts = completedResults.stream()
-            .collect(Collectors.groupingBy(
-                ExecutionResult::finalStatus, Collectors.counting()
-            ));
+    void printSummary() {
+        lock.readLock().lock();
+        try {
+            var counts = results.stream()
+                .collect(Collectors.groupingBy(TaskMetrics::finalStatus, Collectors.counting()));
 
-        OptionalDouble avgMs = completedResults.stream()
-            .mapToLong(r -> r.elapsed().toMillis())
-            .average();
+            var avgMs = results.stream()
+                .mapToLong(m -> m.elapsed().toMillis())
+                .average();
 
-        System.out.println("\n===== Scheduler Summary =====");
-        System.out.println("  Total tasks : " + completedResults.size());
-        counts.forEach((status, count) ->
-            System.out.printf("  %-12s : %d%n", status, count));
-        avgMs.ifPresent(ms ->
-            System.out.printf("  Avg duration: %.1f ms%n", ms));
-        System.out.println("=============================\n");
+            System.out.println("\n===== Scheduler Report =====");
+            System.out.println("  Strategy  : " + strategy.describe());
+            System.out.println("  Total     : " + results.size());
+            counts.forEach((s, c) -> System.out.printf("  %-12s: %d%n", s, c));
+            avgMs.ifPresent(ms -> System.out.printf("  Avg time  : %.1f ms%n", ms));
+
+            // Text block
+            var report = """
+                Summary complete.
+                All tasks processed by the %s strategy.
+                """.formatted(strategy.describe());
+            System.out.println(report);
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
-    @Override
-    public void close() {
-        pool.shutdownNow();
-    }
+    @Override public void close() { pool.shutdownNow(); }
 }
 
-
 // ===========================================================================
-// Entry point
+// Main
 // ===========================================================================
 
 public class test_java {
-
     public static void main(String[] args) throws Exception {
 
+        // Switch expression on sealed type
         SchedulingStrategy strategy = new PriorityFirstStrategy();
+        String stratName = switch (strategy) {
+            case PriorityFirstStrategy p  -> "Priority";
+            case FifoStrategy f           -> "FIFO";
+            case RoundRobinStrategy r     -> "RoundRobin/" + r.buckets();
+        };
+        System.out.println("Using strategy: " + stratName);
 
-        try (TaskScheduler scheduler = new TaskScheduler(4, strategy)) {
+        try (var scheduler = new TaskScheduler(4, strategy)) {
 
-            // Enqueue a mix of tasks at different priority levels
-            scheduler.enqueue(new Task(
-                "Generate weekly report",
-                Priority.HIGH,
-                Duration.ofSeconds(10),
-                () -> { Thread.sleep(200); return "Report generated OK"; }
-            ));
+            scheduler.onComplete(m -> System.out.println("Done: " + m.summary()));
 
-            scheduler.enqueue(new Task(
-                "Send notification emails",
-                Priority.NORMAL,
-                Duration.ofSeconds(5),
-                () -> { Thread.sleep(150); return "Emails dispatched: 42"; }
-            ));
+            // Builder pattern
+            scheduler.enqueue(Task.builder("DB health check")
+                .priority(Priority.CRITICAL)
+                .timeout(Duration.ofSeconds(3))
+                .action(() -> { Thread.sleep(80); return "DB OK — 4ms latency"; })
+                .meta("team", "platform")
+                .build());
 
-            scheduler.enqueue(new Task(
-                "Archive old logs",
-                Priority.LOW,
-                Duration.ofSeconds(8),
-                () -> { Thread.sleep(300); return "Archived 1,204 log files"; }
-            ));
+            scheduler.enqueue(Task.builder("Generate report")
+                .priority(Priority.HIGH)
+                .timeout(Duration.ofSeconds(10))
+                .action(() -> { Thread.sleep(200); return "Report written: 12 pages"; })
+                .build());
 
-            scheduler.enqueue(new Task(
-                "Database health check",
-                Priority.CRITICAL,
-                Duration.ofSeconds(3),
-                () -> { Thread.sleep(100); return "DB reachable — latency 4 ms"; }
-            ));
+            scheduler.enqueue(Task.builder("Send emails")
+                .priority(Priority.NORMAL)
+                .timeout(Duration.ofSeconds(5))
+                .action(() -> { Thread.sleep(150); return "Sent 47 emails"; })
+                .build());
 
-            scheduler.enqueue(new Task(
-                "Intentional timeout task",
-                Priority.LOW,
-                Duration.ofMillis(50),
-                () -> { Thread.sleep(500); return "This should never appear"; }
-            ));
+            scheduler.enqueue(Task.builder("Archive logs")
+                .priority(Priority.LOW)
+                .timeout(Duration.ofSeconds(8))
+                .action(() -> { Thread.sleep(300); return "Archived 2,048 files"; })
+                .build());
 
-            // Run all tasks with a 30-second global ceiling
-            List<ExecutionResult<String>> results =
-                scheduler.dispatchAll(Duration.ofSeconds(30));
+            scheduler.enqueue(Task.builder("Timeout demo")
+                .priority(Priority.LOW)
+                .timeout(Duration.ofMillis(50))
+                .action(() -> { Thread.sleep(500); return "never"; })
+                .build());
 
-            // Print successes
-            System.out.println("Successful results:");
-            results.stream()
-                .filter(ExecutionResult::isSuccess)
-                .forEach(r -> System.out.printf(
-                    "  [%s] %s → %s (%d ms)%n",
-                    r.taskId(), r.taskName(),
-                    r.result().orElse(""),
-                    r.elapsed().toMillis()
+            var metrics = scheduler.dispatchAll(Duration.ofSeconds(30));
+
+            // Stream operations
+            var successes = metrics.stream()
+                .filter(TaskMetrics::isSuccess)
+                .sorted(Comparator.comparing(m -> m.elapsed().toMillis()))
+                .collect(Collectors.toList());
+
+            System.out.println("\nSuccessful tasks (fastest first):");
+            successes.forEach(m -> System.out.println("  " + m.summary()));
+
+            var byStatus = metrics.stream()
+                .collect(Collectors.groupingBy(
+                    TaskMetrics::finalStatus,
+                    Collectors.summarizingLong(m -> m.elapsed().toMillis())
                 ));
 
-            // Print failures
-            List<ExecutionResult<String>> failures =
-                scheduler.queryResults(r -> !r.isSuccess());
-
-            if (!failures.isEmpty()) {
-                System.out.println("Non-successful tasks:");
-                failures.forEach(r -> System.out.printf(
-                    "  [%s] %s — %s%n",
-                    r.taskId(), r.taskName(), r.finalStatus()
-                ));
-            }
+            System.out.println("\nStats by status:");
+            byStatus.forEach((s, stats) ->
+                System.out.printf("  %-12s count=%d avg=%.0fms%n",
+                    s, stats.getCount(), stats.getAverage()));
 
             scheduler.printSummary();
+
+            // Optional chaining
+            metrics.stream()
+                .filter(m -> m.finalStatus() == TaskStatus.TIMED_OUT)
+                .findFirst()
+                .flatMap(m -> m.error())
+                .ifPresent(e -> System.out.println("Timeout error: " + e.getMessage()));
         }
     }
 }

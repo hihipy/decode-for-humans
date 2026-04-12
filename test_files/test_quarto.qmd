@@ -1,0 +1,179 @@
+---
+title: "A/B Test Analysis: Checkout Flow Redesign"
+author: "Growth Analytics"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+  pdf:
+    documentclass: article
+execute:
+  echo: true
+  warning: false
+  cache: true
+---
+
+## Background
+
+This report analyses a 28-day A/B test evaluating whether a simplified
+3-step checkout flow (treatment) outperforms the existing 5-step flow (control)
+on conversion rate and average order value.
+
+**Hypothesis:** Reducing friction in checkout increases conversion without
+reducing average order value.
+
+## Setup
+
+```{python}
+import pandas as pd
+import numpy as np
+from scipy import stats
+from scipy.stats import chi2_contingency, mannwhitneyu
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from statsmodels.stats.proportion import proportions_ztest
+from statsmodels.stats.power import zt_ind_solve_power
+import warnings
+warnings.filterwarnings('ignore')
+
+np.random.seed(2024)
+
+ALPHA          = 0.05
+MDE            = 0.02    # minimum detectable effect (2 pp)
+TEST_DURATION  = 28      # days
+TRAFFIC_SPLIT  = 0.50
+```
+
+```{r setup-r}
+#| message: false
+library(tidyverse)
+library(scales)
+
+# Load the same data for R-side visualisations
+ab_data <- read_csv("ab_test_results.csv", show_col_types = FALSE)
+```
+
+## Data Generation (Simulation)
+
+```{python}
+n_control   = 24_800
+n_treatment = 25_200
+
+control_cr    = 0.042
+treatment_cr  = 0.056
+control_aov   = 87.50
+treatment_aov = 89.20
+
+control_converted   = int(n_control   * control_cr)
+treatment_converted = int(n_treatment * treatment_cr)
+
+control_orders = pd.DataFrame({
+    'group': 'control',
+    'converted': ([1] * control_converted + [0] * (n_control - control_converted)),
+    'order_value': (list(np.random.gamma(3, control_aov / 3, control_converted)) +
+                    [0] * (n_control - control_converted))
+})
+
+treatment_orders = pd.DataFrame({
+    'group': 'treatment',
+    'converted': ([1] * treatment_converted + [0] * (n_treatment - treatment_converted)),
+    'order_value': (list(np.random.gamma(3, treatment_aov / 3, treatment_converted)) +
+                    [0] * (n_treatment - treatment_converted))
+})
+
+ab = pd.concat([control_orders, treatment_orders], ignore_index=True).sample(frac=1, random_state=42)
+print(f"Total visitors: {len(ab):,}")
+print(ab.groupby('group')['converted'].agg(['sum', 'mean']).rename(
+    columns={'sum': 'conversions', 'mean': 'conversion_rate'}))
+```
+
+## Statistical Tests
+
+### Conversion Rate
+
+```{python}
+ctrl  = ab[ab['group'] == 'control']
+trt   = ab[ab['group'] == 'treatment']
+
+counts   = np.array([trt['converted'].sum(),  ctrl['converted'].sum()])
+nobs     = np.array([len(trt), len(ctrl)])
+z_stat, p_value = proportions_ztest(counts, nobs, alternative='larger')
+
+relative_lift = (trt['converted'].mean() - ctrl['converted'].mean()) / ctrl['converted'].mean()
+
+print(f"Control CR:    {ctrl['converted'].mean():.2%}")
+print(f"Treatment CR:  {trt['converted'].mean():.2%}")
+print(f"Relative lift: {relative_lift:+.1%}")
+print(f"Z-statistic:   {z_stat:.3f}")
+print(f"P-value:       {p_value:.4f}")
+print(f"Significant:   {p_value < ALPHA}")
+```
+
+### Average Order Value (Among Converters)
+
+```{python}
+ctrl_aov = ctrl[ctrl['converted'] == 1]['order_value']
+trt_aov  = trt[trt['converted']  == 1]['order_value']
+
+u_stat, p_mann = mannwhitneyu(trt_aov, ctrl_aov, alternative='two-sided')
+
+print(f"Control AOV:   ${ctrl_aov.mean():.2f}")
+print(f"Treatment AOV: ${trt_aov.mean():.2f}")
+print(f"Mann-Whitney U: {u_stat:.0f},  p = {p_mann:.4f}")
+print(f"AOV difference significant: {p_mann < ALPHA}")
+```
+
+### Revenue Impact
+
+```{python}
+daily_visitors    = (n_control + n_treatment) / TEST_DURATION
+ctrl_daily_rev    = daily_visitors * TRAFFIC_SPLIT * ctrl['converted'].mean() * ctrl_aov.mean()
+trt_daily_rev     = daily_visitors * TRAFFIC_SPLIT * trt['converted'].mean() * trt_aov.mean()
+annual_uplift_est = (trt_daily_rev - ctrl_daily_rev) * 365
+
+print(f"Estimated annual revenue uplift: ${annual_uplift_est:,.0f}")
+```
+
+## Segmentation
+
+```{python}
+device_type = np.random.choice(['mobile', 'desktop', 'tablet'],
+                               len(ab), p=[0.58, 0.35, 0.07])
+ab['device'] = device_type
+
+seg = ab.groupby(['group', 'device'])['converted'].agg(['sum', 'count', 'mean'])
+seg.columns = ['conversions', 'visitors', 'conversion_rate']
+print(seg.round(4))
+```
+
+## Visualisations
+
+```{r plots}
+#| fig-width: 10
+#| fig-height: 5
+ggplot(ab_data, aes(x = group, y = converted, fill = group)) +
+  stat_summary(fun = mean, geom = "bar", alpha = 0.85) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2) +
+  scale_fill_manual(values = c("control" = "#6c757d", "treatment" = "#0d6efd")) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "Conversion Rate by Group",
+       subtitle = "Error bars show ±1 SE",
+       x = NULL, y = "Conversion Rate") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+```
+
+## Conclusion
+
+```{python}
+print("=" * 50)
+print("TEST CONCLUSION")
+print("=" * 50)
+print(f"Result:         {'SHIP' if p_value < ALPHA else 'DO NOT SHIP'}")
+print(f"CR lift:        {relative_lift:+.1%}  (p={p_value:.4f})")
+print(f"AOV impact:     {'Neutral' if p_mann >= ALPHA else 'Significant'}")
+print(f"Annual uplift:  ${annual_uplift_est:,.0f}")
+print("Recommendation: Roll out simplified checkout to 100% of users.")
+```

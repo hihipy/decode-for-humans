@@ -1,25 +1,21 @@
 """
 decode_for_humans.py
 
-Reads a source code file, sends it to an AI provider, and produces a
-clean plain-English PDF explanation suitable for non-technical readers.
+Translates source code (and notebooks) into plain-English Markdown + TXT
+explanations for non-technical readers.
 
-Usage:
-    python decode_for_humans.py <file> [--provider NAME] [--no-source]
+Output:
+  {name}_explanation.md   — Markdown (renders in GitHub, Obsidian, VS Code…)
+  {name}_explanation.txt  — Plain text (always, no external tools needed)
 
-    <file>              Path to any supported source code file.
-    --provider NAME     AI provider to use (Claude, ChatGPT, Gemini,
-                        Mistral, Groq). Defaults to the saved active
-                        provider in ~/.decode_for_humans/config.json.
-    --no-source         Omit the raw source code appendix from the PDF.
+Supported notebooks:
+  .ipynb  Jupyter  — cells extracted, kernel language detected
+  .qmd    Quarto   — read as text (YAML front-matter preserved for context)
+  .rmd    R Markdown — read as text
+  .jl     Pluto.jl — read as text (Pluto reactive cells detected)
 
 Dependencies:
-    pip install reportlab
-    pip install anthropic   # for Claude
-    pip install openai      # for ChatGPT
-    pip install google-genai  # for Gemini
-    pip install mistralai   # for Mistral
-    pip install groq        # for Groq
+  pip install anthropic   # or openai / google-genai / mistralai / groq
 """
 
 from __future__ import annotations
@@ -28,22 +24,10 @@ import argparse
 import json
 import re
 import sys
+import textwrap
+from datetime import datetime
 from pathlib import Path
-
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import (
-    HRFlowable,
-    Paragraph,
-    Preformatted,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+from typing import Callable
 
 from providers import PROVIDERS, get_provider
 
@@ -51,63 +35,125 @@ from providers import PROVIDERS, get_provider
 # Constants
 # ---------------------------------------------------------------------------
 
-CONFIG_DIR: Path = Path.home() / ".decode_for_humans"
+CONFIG_DIR:  Path = Path.home() / ".decode_for_humans"
 CONFIG_FILE: Path = CONFIG_DIR / "config.json"
 
-SOURCE_LINE_LIMIT: int = 120
-MAX_PDF_TOKENS: int = 4096
+SOURCE_LINE_LIMIT: int = 150
+MAX_CODE_CHARS:    int = 80_000
 
-PAGE_MARGIN: float = 1.0 * inch
-CONTENT_WIDTH: float = 6.5 * inch
-
-# PDF colour palette
-COLOR_NAVY: colors.HexColor = colors.HexColor("#1B2A4A")
-COLOR_WHITE: colors.Color = colors.white
-COLOR_TEXT: colors.HexColor = colors.HexColor("#1E293B")
-COLOR_MUTED: colors.HexColor = colors.HexColor("#64748B")
-COLOR_BORDER: colors.HexColor = colors.HexColor("#CBD5E1")
-COLOR_LIGHT: colors.HexColor = colors.HexColor("#F4F7FA")
-COLOR_SUBTITLE: colors.HexColor = colors.HexColor("#B0C4D8")
-
-# Supported file extensions mapped to human-readable language names.
+# Map file extension → human-readable language name
 EXTENSION_MAP: dict[str, str] = {
-    ".py": "Python",
-    ".js": "JavaScript",
-    ".ts": "TypeScript",
-    ".jsx": "React (JSX)",
-    ".tsx": "React (TSX)",
-    ".java": "Java",
-    ".c": "C",
-    ".cpp": "C++",
-    ".cs": "C#",
+    ".py": "Python", ".pyw": "Python",
+    ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
+    ".ts": "TypeScript", ".mts": "TypeScript",
+    ".jsx": "React (JSX)", ".tsx": "React (TSX)",
+    ".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin",
+    ".scala": "Scala", ".groovy": "Groovy",
+    ".c": "C", ".h": "C",
+    ".cpp": "C++", ".cc": "C++", ".cxx": "C++", ".hpp": "C++",
+    ".cs": "C#", ".fs": "F#", ".vb": "Visual Basic",
     ".go": "Go",
     ".rs": "Rust",
-    ".rb": "Ruby",
+    ".rb": "Ruby", ".rake": "Ruby",
     ".php": "PHP",
     ".swift": "Swift",
-    ".kt": "Kotlin",
-    ".scala": "Scala",
-    ".pl": "Perl",
+    ".pl": "Perl", ".pm": "Perl",
     ".lua": "Lua",
-    ".sh": "Shell / Bash",
-    ".ps1": "PowerShell",
-    ".r": "R",
+    ".sh": "Shell / Bash", ".bash": "Shell / Bash",
+    ".zsh": "Zsh", ".fish": "Fish Shell",
+    ".ps1": "PowerShell", ".psm1": "PowerShell",
+    ".r": "R", ".rmd": "R Markdown",
     ".jl": "Julia",
     ".sql": "SQL",
-    ".m": "MATLAB",
-    ".html": "HTML",
-    ".css": "CSS",
-    ".scss": "SCSS",
-    ".yaml": "YAML",
-    ".yml": "YAML",
-    ".json": "JSON",
-    ".xml": "XML",
+    ".m": "MATLAB / Objective-C",
+    ".ex": "Elixir", ".exs": "Elixir",
+    ".erl": "Erlang", ".hrl": "Erlang",
+    ".hs": "Haskell", ".lhs": "Haskell",
+    ".ml": "OCaml", ".mli": "OCaml",
+    ".clj": "Clojure", ".cljs": "ClojureScript",
+    ".dart": "Dart",
+    ".html": "HTML", ".htm": "HTML",
+    ".css": "CSS", ".scss": "SCSS", ".sass": "Sass", ".less": "Less",
+    ".yaml": "YAML", ".yml": "YAML",
+    ".json": "JSON", ".jsonc": "JSON",
+    ".xml": "XML", ".svg": "SVG",
+    ".toml": "TOML", ".ini": "INI", ".cfg": "Config",
     ".ipynb": "Jupyter Notebook",
     ".qmd": "Quarto",
-    ".rmd": "R Markdown",
+    ".md": "Markdown",
+    ".dockerfile": "Dockerfile", ".tf": "Terraform",
+    ".proto": "Protocol Buffers",
 }
 
-# Prompt template — instructs the AI to return exactly four sections.
+# Shebang patterns for extensionless scripts
+SHEBANG_MAP: list[tuple[str, str]] = [
+    ("python",     "Python"),
+    ("node",       "JavaScript"),
+    ("ruby",       "Ruby"),
+    ("perl",       "Perl"),
+    ("php",        "PHP"),
+    ("bash",       "Shell / Bash"),
+    ("sh",         "Shell / Bash"),
+    ("zsh",        "Zsh"),
+    ("fish",       "Fish Shell"),
+    ("powershell", "PowerShell"),
+    ("Rscript",    "R"),
+    ("julia",      "Julia"),
+    ("lua",        "Lua"),
+]
+
+# Fence language identifiers for Markdown code blocks
+FENCE_LANG: dict[str, str] = {
+    "Python": "python", "JavaScript": "javascript", "TypeScript": "typescript",
+    "React (JSX)": "jsx", "React (TSX)": "tsx",
+    "Java": "java", "Kotlin": "kotlin", "Scala": "scala", "Groovy": "groovy",
+    "C": "c", "C++": "cpp", "C#": "csharp", "F#": "fsharp",
+    "Go": "go", "Rust": "rust", "Ruby": "ruby", "PHP": "php",
+    "Swift": "swift", "Dart": "dart", "Lua": "lua",
+    "Shell / Bash": "bash", "Zsh": "bash", "Fish Shell": "fish",
+    "PowerShell": "powershell",
+    "R": "r", "R Markdown": "r", "Julia": "julia",
+    "SQL": "sql", "HTML": "html", "CSS": "css",
+    "SCSS": "scss", "Sass": "sass", "Less": "less",
+    "YAML": "yaml", "JSON": "json", "TOML": "toml",
+    "XML": "xml", "Markdown": "markdown",
+    "Dockerfile": "dockerfile", "Terraform": "hcl",
+    "Elixir": "elixir", "Erlang": "erlang",
+    "Haskell": "haskell", "OCaml": "ocaml",
+    "Clojure": "clojure", "Quarto": "markdown",
+    "Jupyter Notebook": "python", "Protocol Buffers": "protobuf",
+}
+
+# Known unsupported formats — rejected with a helpful message
+_UNSUPPORTED_FORMATS: dict[str, str] = {
+    ".pdf":  "PDF documents",
+    ".doc":  "Word documents",  ".docx": "Word documents",
+    ".xls":  "Excel files",     ".xlsx": "Excel files",
+    ".ppt":  "PowerPoint files",".pptx": "PowerPoint files",
+    ".png":  "PNG images",  ".jpg": "JPEG images", ".jpeg": "JPEG images",
+    ".gif":  "GIF images",  ".bmp": "BMP images",  ".ico":  "icon files",
+    ".tiff": "TIFF images", ".webp": "WebP images",
+    ".zip":  "ZIP archives", ".tar": "tar archives",
+    ".gz":   "gzip archives", ".7z": "7-Zip archives", ".rar": "RAR archives",
+    ".exe":  "Windows executables", ".dll": "DLL files",
+    ".so":   "shared libraries",   ".dylib": "dynamic libraries",
+    ".pyc":  "compiled Python bytecode",
+    ".class":"compiled Java bytecode", ".jar": "Java archives",
+    ".mp3":  "audio files", ".mp4": "video files", ".mov": "video files",
+    ".txt":  "plain text files",
+    ".csv":  "CSV data files", ".log": "log files",
+}
+
+# Section names expected in AI response (others demoted)
+_KNOWN_SECTIONS: frozenset = frozenset({
+    "what this file does",
+    "how it works", "how it works — step by step",
+    "key things to know",
+    "dependencies", "dependencies & setup",
+    "plain-english summary", "plain english summary",
+    "original source code",
+})
+
 PROMPT_TEMPLATE: str = """\
 You are an expert at explaining technical code to non-technical people.
 
@@ -115,26 +161,29 @@ Explain the {language} file named '{filename}' in plain English for someone
 with no programming knowledge whatsoever. Use simple, everyday language.
 Never use technical jargon without immediately explaining it in plain terms.
 
-Structure your response using exactly these four section headings, in order:
+Format your response in Markdown using exactly these section headings, in order:
 
 ## What This File Does
-2-4 sentences describing the overall purpose. What problem does it solve?
-What does it produce or enable?
+2-4 sentences describing the overall purpose.
 
 ## How It Works — Step by Step
-A numbered list walking through the logic from top to bottom. Each step
-should be a complete sentence or two. If a concept is technical, explain
-it in plain terms immediately (e.g. "a loop — meaning it repeats the same
-action multiple times until a condition is met").
+Numbered list walking through the logic. Each step should be one or two
+plain-English sentences. Explain technical terms immediately.
 
 ## Key Things to Know
-3-6 bullet points covering the most important facts a non-technical
-stakeholder needs: what data it uses, what it produces, any risks,
-assumptions, or external services it depends on.
+3-6 bullet points: what data it uses, what it produces, risks, assumptions,
+external services it depends on.
+
+## Dependencies & Setup
+ONLY include this section if the file has explicit external dependencies
+(imports, packages, environment variables, config files it needs that must be
+installed separately). If it uses only the standard library, omit this section.
+List each dependency in plain English — what it is and whether it needs
+separate installation.
 
 ## Plain-English Summary
-3-5 sentences written as if you were explaining this to a group of
-executives in a meeting. No bullet points. Plain conversational prose only.
+3-5 sentences written for executives in a meeting. No bullet points.
+Plain conversational prose only.
 
 ---
 
@@ -145,18 +194,47 @@ Here is the code to explain:
 ```
 """
 
+NOTEBOOK_PROMPT_TEMPLATE: str = """\
+You are an expert at explaining technical notebooks to non-technical people.
+
+Explain the {language} notebook named '{filename}' in plain English for someone
+with no programming knowledge whatsoever. A notebook is an interactive document
+that mixes code, results, and explanatory text in sections called "cells."
+
+Format your response in Markdown using exactly these section headings, in order:
+
+## What This Notebook Does
+2-4 sentences describing the overall purpose and what question it answers.
+
+## How It Works — Step by Step
+Walk through the notebook cell by cell (or logical group by group). Explain
+what each section does in plain English. Label cells naturally (e.g.
+"The first section imports tools…").
+
+## Key Things to Know
+3-6 bullet points covering inputs needed, outputs produced, assumptions made,
+and any external services or data the notebook depends on.
+
+## Dependencies & Setup
+ONLY include if there are external packages to install. List each one plainly.
+
+## Plain-English Summary
+3-5 executive-friendly sentences summarising what the notebook does,
+what it produces, and when you'd run it.
+
+---
+
+Here is the notebook content:
+
+{code}
+"""
+
 
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
 
 def load_config() -> dict:
-    """Load the saved configuration from disk.
-
-    Returns:
-        A dict with keys 'active_provider' and 'keys'. Returns safe
-        defaults if the config file does not exist yet.
-    """
     if not CONFIG_FILE.exists():
         return {"active_provider": "", "keys": {}}
     try:
@@ -166,55 +244,139 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
-    """Persist the configuration to disk.
-
-    Args:
-        config: The full config dict to write.
-    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(
-        json.dumps(config, indent=2), encoding="utf-8"
-    )
+    CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
 # File helpers
 # ---------------------------------------------------------------------------
 
-def detect_language(path: Path) -> str:
-    """Return a human-readable language name for a given file path.
+def _is_binary(data: bytes) -> bool:
+    if b"\x00" in data:
+        return True
+    non_text = sum(1 for b in data[:4096] if b < 9 or (13 < b < 32))
+    return non_text / max(len(data[:4096]), 1) > 0.30
 
-    Args:
-        path: Path to the source code file.
 
-    Returns:
-        A language name string (e.g. "Python"), or "Unknown" if the
-        extension is not in the supported map.
+def _is_minified(text: str) -> bool:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    avg_len = sum(len(l) for l in lines) / len(lines)
+    return avg_len > 300 or (len(lines) < 5 and len(text) > 2000)
+
+
+def detect_language(path: Path, content: str | None = None) -> str:
+    lang = EXTENSION_MAP.get(path.suffix.lower())
+    if lang:
+        return lang
+    name_lower = path.name.lower()
+    if name_lower == "dockerfile":          return "Dockerfile"
+    if name_lower in ("makefile", "gnumakefile"): return "Makefile"
+    if name_lower in ("rakefile", "gemfile"):     return "Ruby"
+    if name_lower in ("jenkinsfile",):            return "Groovy / Jenkinsfile"
+    if content:
+        first = content.splitlines()[0] if content.splitlines() else ""
+        if first.startswith("#!"):
+            for token, lang_name in SHEBANG_MAP:
+                if token in first:
+                    return lang_name
+    return "Unknown"
+
+
+def _read_notebook(path: Path) -> tuple[str, str]:
+    """Extract source code from a Jupyter notebook (.ipynb).
+
+    Returns (extracted_source, kernel_language).
     """
-    return EXTENSION_MAP.get(path.suffix.lower(), "Unknown")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    kernel_lang = (
+        data.get("metadata", {})
+            .get("kernelspec", {})
+            .get("language", "python")
+    )
+    lang_name = {
+        "python": "Python", "r": "R", "julia": "Julia",
+        "scala": "Scala", "javascript": "JavaScript",
+    }.get(kernel_lang.lower(), kernel_lang.capitalize())
+
+    cells: list[str] = []
+    for i, cell in enumerate(data.get("cells", []), 1):
+        cell_type = cell.get("cell_type", "code")
+        source    = "".join(cell.get("source", []))
+        if not source.strip():
+            continue
+        if cell_type == "markdown":
+            # Prefix each markdown line with #  so it reads clearly
+            md_lines = [f"# {l}" if l.strip() else "#" for l in source.splitlines()]
+            cells.append(f"# ── Cell {i}: Markdown ──\n" + "\n".join(md_lines))
+        elif cell_type == "code":
+            cells.append(f"# ── Cell {i}: Code ──\n{source}")
+        elif cell_type == "raw":
+            cells.append(f"# ── Cell {i}: Raw ──\n# {source}")
+
+    return "\n\n".join(cells), lang_name
+
+
+def _is_pluto_notebook(content: str) -> bool:
+    """Detect Pluto.jl reactive notebooks (Julia)."""
+    return "PlutoRunner" in content or "# ╔═╡" in content
 
 
 def read_file(path: Path) -> str:
-    """Read a source file and return its contents as a string.
+    """Read a source file with multi-encoding fallback.
 
-    Args:
-        path: Path to the source code file.
-
-    Returns:
-        The full file contents as a UTF-8 string.
+    For .ipynb files, cells are extracted and returned as annotated source.
 
     Raises:
-        FileNotFoundError: If the path does not exist.
-        ValueError: If the file is empty.
+        FileNotFoundError: path does not exist.
+        ValueError:        unsupported format, empty, or binary file.
     """
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    content = path.read_text(encoding="utf-8", errors="replace").strip()
+    ext = path.suffix.lower()
 
-    if not content:
+    # Explicit rejection of known-unsupported formats
+    if ext in _UNSUPPORTED_FORMATS and ext not in EXTENSION_MAP:
+        kind = _UNSUPPORTED_FORMATS[ext]
+        raise ValueError(
+            f"'{path.name}' is a {kind} — "
+            f"decode-for-humans only works with source code files.\n"
+            f"Supported: .py .js .ts .go .rs .java .sql .r .ipynb .qmd and 40+ more."
+        )
+
+    # Jupyter notebooks are JSON — special extraction
+    if ext == ".ipynb":
+        try:
+            source, _ = _read_notebook(path)
+            return source
+        except Exception as exc:
+            raise ValueError(f"Could not parse notebook '{path.name}': {exc}") from exc
+
+    raw = path.read_bytes()
+    if not raw:
         raise ValueError(f"File is empty: {path}")
 
+    if _is_binary(raw):
+        raise ValueError(
+            f"'{path.name}' appears to be a binary file. "
+            "decode-for-humans only works with plain-text source files."
+        )
+
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            content = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        content = raw.decode("utf-8", errors="replace")
+
+    content = content.strip()
+    if not content:
+        raise ValueError(f"File is empty after stripping: {path}")
     return content
 
 
@@ -223,243 +385,45 @@ def read_file(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def build_prompt(filename: str, language: str, code: str) -> str:
-    """Assemble the full prompt string to send to the AI provider.
+    """Build the AI prompt, truncating code if it exceeds MAX_CODE_CHARS."""
+    if len(code) > MAX_CODE_CHARS:
+        lines       = code.splitlines()
+        kept, total = [], 0
+        for line in lines:
+            if total + len(line) > MAX_CODE_CHARS:
+                break
+            kept.append(line)
+            total += len(line) + 1
+        omitted = len(lines) - len(kept)
+        code = "\n".join(kept) + f"\n\n# … ({omitted} more lines truncated)"
 
-    Args:
-        filename: The base name of the source file (e.g. "pipeline.py").
-        language: Human-readable language name (e.g. "Python").
-        code: The raw source code string.
-
-    Returns:
-        A formatted prompt string ready to pass to provider.explain().
-    """
-    return PROMPT_TEMPLATE.format(
-        language=language,
-        filename=filename,
-        code=code,
-    )
-
-
-# ---------------------------------------------------------------------------
-# PDF styles
-# ---------------------------------------------------------------------------
-
-def _build_pdf_styles() -> dict[str, ParagraphStyle]:
-    """Build and return all ReportLab paragraph styles used in the PDF.
-
-    Returns:
-        A dict mapping style name strings to ParagraphStyle objects.
-    """
-    return {
-        "doc_title": ParagraphStyle(
-            "doc_title",
-            fontName="Helvetica-Bold",
-            fontSize=22,
-            textColor=COLOR_WHITE,
-            alignment=TA_CENTER,
-            spaceAfter=4,
-        ),
-        "doc_subtitle": ParagraphStyle(
-            "doc_subtitle",
-            fontName="Helvetica",
-            fontSize=11,
-            textColor=COLOR_SUBTITLE,
-            alignment=TA_CENTER,
-        ),
-        "section_heading": ParagraphStyle(
-            "section_heading",
-            fontName="Helvetica-Bold",
-            fontSize=13,
-            textColor=COLOR_NAVY,
-            spaceBefore=16,
-            spaceAfter=6,
-        ),
-        "body": ParagraphStyle(
-            "body",
-            fontName="Helvetica",
-            fontSize=10.5,
-            textColor=COLOR_TEXT,
-            leading=16,
-            spaceAfter=6,
-            alignment=TA_LEFT,
-        ),
-        "bullet": ParagraphStyle(
-            "bullet",
-            fontName="Helvetica",
-            fontSize=10.5,
-            textColor=COLOR_TEXT,
-            leading=16,
-            leftIndent=18,
-            spaceAfter=4,
-        ),
-        "numbered": ParagraphStyle(
-            "numbered",
-            fontName="Helvetica",
-            fontSize=10.5,
-            textColor=COLOR_TEXT,
-            leading=16,
-            leftIndent=22,
-            spaceAfter=5,
-        ),
-        "code_block": ParagraphStyle(
-            "code_block",
-            fontName="Courier",
-            fontSize=8,
-            leading=12,
-            textColor=colors.HexColor("#334155"),
-            leftIndent=8,
-            rightIndent=8,
-        ),
-        "footer": ParagraphStyle(
-            "footer",
-            fontName="Helvetica",
-            fontSize=8,
-            textColor=COLOR_MUTED,
-            alignment=TA_CENTER,
-        ),
-    }
+    # Use notebook-aware prompt for .ipynb
+    is_notebook = any(marker in code for marker in
+                      ["# ── Cell ", "PlutoRunner", "# ╔═╡"])
+    template = NOTEBOOK_PROMPT_TEMPLATE if is_notebook else PROMPT_TEMPLATE
+    return template.format(language=language, filename=filename, code=code)
 
 
 # ---------------------------------------------------------------------------
-# PDF rendering helpers
+# Markdown builder  (primary output)
 # ---------------------------------------------------------------------------
 
-def _render_header_banner(
-    filename: str, language: str, styles: dict
-) -> Table:
-    """Build the navy header banner shown at the top of the PDF.
-
-    Args:
-        filename: The source file name displayed in the banner.
-        language: The detected language displayed in the banner.
-        styles: The styles dict from _build_pdf_styles().
-
-    Returns:
-        A ReportLab Table flowable styled as the header banner.
-    """
-    rows = [
-        [Paragraph("Code Explanation Report", styles["doc_title"])],
-        [Paragraph(f"{filename} &nbsp;·&nbsp; {language}", styles["doc_subtitle"])],
-    ]
-    table = Table(rows, colWidths=[CONTENT_WIDTH])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), COLOR_NAVY),
-        ("TOPPADDING", (0, 0), (-1, 0), 18),
-        ("BOTTOMPADDING", (0, -1), (-1, -1), 18),
-        ("ROWPADDING", (0, 0), (-1, -1), 10),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ]))
-    return table
+def _md_anchor(text: str) -> str:
+    """GitHub-compatible heading anchor from text."""
+    return re.sub(r"[^\w\s-]", "", text.lower()).strip().replace(" ", "-")
 
 
-def _render_explanation(
-    explanation: str, styles: dict
-) -> list:
-    """Convert the AI explanation text into a list of ReportLab flowables.
-
-    Parses the fixed four-section markdown-style output and maps each
-    element to an appropriate paragraph style.
-
-    Args:
-        explanation: The raw explanation string returned by the provider.
-        styles: The styles dict from _build_pdf_styles().
-
-    Returns:
-        A list of ReportLab flowable objects ready to append to a story.
-    """
-    flowables = []
-
-    for line in explanation.splitlines():
-        stripped = line.strip()
-
-        if not stripped:
-            continue
-
-        if stripped.startswith("## "):
-            heading = stripped[3:].strip()
-            flowables.append(
-                HRFlowable(width="100%", thickness=1, color=COLOR_BORDER, spaceAfter=4)
-            )
-            flowables.append(Paragraph(heading, styles["section_heading"]))
-            continue
-
-        # Numbered list item: "1." or "1)"
-        if re.match(r"^\d+[.)]\s", stripped):
-            number, _, rest = stripped.partition(" ")
-            number = number.rstrip(".")
-            content = rest.strip()
-            flowables.append(
-                Paragraph(f"<b>{number}.</b>  {content}", styles["numbered"])
-            )
-            continue
-
-        if stripped.startswith(("- ", "* ")):
-            content = stripped[2:].strip()
-            # Convert **bold** markers to ReportLab tags
-            content = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", content)
-            flowables.append(
-                Paragraph(f"&bull; &nbsp; {content}", styles["bullet"])
-            )
-            continue
-
-        # Regular body paragraph — convert bold markers
-        body_text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", stripped)
-        flowables.append(Paragraph(body_text, styles["body"]))
-
-    return flowables
+def _extract_md_headings(text: str) -> list[tuple[int, str]]:
+    """Return (level, heading_text) for each ## heading in explanation."""
+    result = []
+    for line in text.splitlines():
+        m = re.match(r"^(#{2,4})\s+(.+)$", line.strip())
+        if m:
+            result.append((len(m.group(1)), m.group(2).strip()))
+    return result
 
 
-def _render_source_appendix(
-    code: str, language: str, styles: dict
-) -> list:
-    """Build the source code appendix shown at the end of the PDF.
-
-    Truncates very long files to SOURCE_LINE_LIMIT lines to keep
-    the PDF a reasonable size.
-
-    Args:
-        code: The raw source code string.
-        language: Human-readable language name for the section label.
-        styles: The styles dict from _build_pdf_styles().
-
-    Returns:
-        A list of ReportLab flowable objects for the appendix section.
-    """
-    flowables: list = [
-        Spacer(1, 12),
-        HRFlowable(width="100%", thickness=1, color=COLOR_BORDER, spaceAfter=8),
-        Paragraph("Original Source Code", styles["section_heading"]),
-        Paragraph(
-            f"The {language} source analysed to produce this report.",
-            styles["body"],
-        ),
-    ]
-
-    lines = code.splitlines()
-    if len(lines) > SOURCE_LINE_LIMIT:
-        truncated = "\n".join(lines[:SOURCE_LINE_LIMIT])
-        truncated += f"\n\n... ({len(lines) - SOURCE_LINE_LIMIT} more lines not shown)"
-    else:
-        truncated = code
-
-    code_para = Preformatted(truncated, styles["code_block"])
-    box = Table([[code_para]], colWidths=[CONTENT_WIDTH])
-    box.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), COLOR_LIGHT),
-        ("BOX", (0, 0), (-1, -1), 0.75, COLOR_BORDER),
-        ("ROWPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    flowables.append(box)
-
-    return flowables
-
-
-# ---------------------------------------------------------------------------
-# PDF builder
-# ---------------------------------------------------------------------------
-
-def build_pdf(
+def build_md(
     output_path: Path,
     filename: str,
     language: str,
@@ -467,48 +431,230 @@ def build_pdf(
     explanation: str,
     include_source: bool = True,
 ) -> None:
-    """Render the explanation and optional source code into a PDF file.
+    """Write a Markdown explanation file.
 
-    Args:
-        output_path: Destination path for the generated PDF.
-        filename: Original source file name, shown in the header banner.
-        language: Detected language, shown in the header banner.
-        code: Raw source code (used in the appendix if include_source).
-        explanation: Plain-English explanation returned by the AI provider.
-        include_source: Whether to append the raw source code at the end.
+    The AI response is already Markdown — we add a header, auto-generate
+    a table of contents from the ## headings, append the source block,
+    and write the footer.
     """
-    styles = _build_pdf_styles()
+    if not explanation or not explanation.strip():
+        raise ValueError("The AI returned an empty explanation. Please try again.")
 
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=letter,
-        leftMargin=PAGE_MARGIN,
-        rightMargin=PAGE_MARGIN,
-        topMargin=0.75 * inch,
-        bottomMargin=0.75 * inch,
-    )
+    fence = FENCE_LANG.get(language, "")
+    today = datetime.now().strftime("%Y-%m-%d")
+    lines: list[str] = []
 
-    story: list = []
+    # ── Document header ───────────────────────────────────────────────────
+    lines += [
+        "# Code Explanation Report",
+        "",
+        f"| | |",
+        f"|---|---|",
+        f"| **File** | `{filename}` |",
+        f"| **Language** | {language} |",
+        f"| **Generated** | {today} |",
+        f"| **Tool** | decode-for-humans |",
+        "",
+        "---",
+        "",
+    ]
 
-    story.append(_render_header_banner(filename, language, styles))
-    story.append(Spacer(1, 16))
-    story.extend(_render_explanation(explanation, styles))
+    # ── Auto-generated TOC ────────────────────────────────────────────────
+    headings = _extract_md_headings(explanation)
+    if include_source:
+        headings.append((2, "Original Source Code"))
+
+    if headings:
+        lines.append("## Table of Contents")
+        lines.append("")
+        for level, text in headings:
+            indent = "  " * (level - 2)
+            lines.append(f"{indent}- [{text}](#{_md_anchor(text)})")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    # ── AI explanation (already Markdown — pass through) ─────────────────
+    exp_lines = explanation.strip().splitlines()
+    cleaned = []
+    prev_heading = False
+    for line in exp_lines:
+        is_rule    = line.strip() == "---"
+        is_heading = bool(re.match(r"^#{1,6} ", line.strip()))
+        # Drop --- that immediately follow a heading (AI-added noise; we add our own)
+        if is_rule and prev_heading:
+            prev_heading = False
+            continue
+        cleaned.append(line)
+        prev_heading = is_heading
+    lines.append("\n".join(cleaned))
+    lines.append("")
+
+    # ── Source code appendix ──────────────────────────────────────────────
+    if include_source:
+        src_lines = code.splitlines()
+        shown     = src_lines[:SOURCE_LINE_LIMIT]
+        omitted   = len(src_lines) - SOURCE_LINE_LIMIT
+
+        # If the source itself contains triple backticks (notebooks, .qmd, .rmd,
+        # .md files with code blocks) use ~~~ as the outer fence so the inner
+        # ``` don't prematurely close the code block.
+        has_backtick_fence = any(ln.strip().startswith("```") for ln in shown)
+        outer_fence = "~~~" if has_backtick_fence else f"```{fence}"
+
+        lines += [
+            "---",
+            "",
+            "## Original Source Code",
+            "",
+            f"*The {language} source analysed to produce this report.*",
+            "",
+            outer_fence,
+        ]
+        lines.extend(shown)
+        if omitted > 0:
+            lines += [
+                "",
+                f"# … {omitted:,} more lines not shown "
+                f"(showing first {SOURCE_LINE_LIMIT} of {len(src_lines):,})",
+            ]
+        lines += [outer_fence if has_backtick_fence else "```", ""]
+
+    # ── Minified warning ──────────────────────────────────────────────────
+    if _is_minified(code):
+        lines.insert(
+            lines.index("---") + 1 if "---" in lines else 0,
+            "> ⚠️ **Note:** This file appears to be minified or machine-generated. "
+            "The explanation may be less accurate than for hand-written source code.\n",
+        )
+
+    # ── Footer ────────────────────────────────────────────────────────────
+    lines += [
+        "---",
+        "",
+        "*Generated by [decode-for-humans](https://github.com/hihipy/decode-for-humans) "
+        "· Licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)*",
+    ]
+
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Plain-text builder  (secondary output)
+# ---------------------------------------------------------------------------
+
+def build_txt(
+    output_path: Path,
+    filename: str,
+    language: str,
+    code: str,
+    explanation: str,
+    include_source: bool = True,
+) -> None:
+    """Write a clean, editable plain-text version."""
+    WIDTH  = 80
+    DIV_H  = "─" * WIDTH
+    DIV_L  = "·" * WIDTH
+
+    def _strip_md(text: str) -> str:
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        text = re.sub(r"`([^`]+)`",     r"\1", text)
+        text = re.sub(r"^#{1,6}\s+",   "",    text, flags=re.MULTILINE)
+        return text
+
+    def _wrap(text: str, indent: str = "  ") -> list[str]:
+        return textwrap.wrap(
+            text, WIDTH - len(indent),
+            initial_indent=indent, subsequent_indent=indent
+        ) or [""]
+
+    out: list[str] = [
+        DIV_H,
+        "CODE EXPLANATION REPORT".center(WIDTH),
+        DIV_H,
+        f"  File     : {filename}",
+        f"  Language : {language}",
+        f"  Tool     : decode-for-humans",
+        DIV_H, "",
+    ]
+
+    in_fence   = False
+    fence_buf: list[str] = []
+
+    def flush_fence():
+        nonlocal fence_buf
+        for ln in fence_buf:
+            out.append("  " + ln)
+        fence_buf = []
+
+    for line in explanation.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            if in_fence:
+                flush_fence()
+                in_fence = False
+            else:
+                in_fence = True
+            continue
+
+        if in_fence:
+            fence_buf.append(line)
+            continue
+
+        # "---" horizontal rules from AI → proper divider in TXT
+        if stripped == "---":
+            out.append(DIV_L)
+            continue
+
+        if not stripped:
+            out.append("")
+            continue
+
+        if re.match(r"^#{1,6}\s+", stripped):
+            heading = re.sub(r"^#{1,6}\s+", "", stripped)
+            heading = _strip_md(heading).upper()
+            out += ["", DIV_L, heading, "─" * len(heading), ""]
+            continue
+
+        if re.match(r"^\d+[.)]\s", stripped):
+            num, _, rest = stripped.partition(" ")
+            num = num.rstrip(".)").strip()
+            text = _strip_md(rest.strip())
+            wrapped = _wrap(text, indent=" " * 6)
+            wrapped[0] = f"  {num:>2}.  " + wrapped[0].lstrip()
+            out += wrapped
+            continue
+
+        if stripped.startswith(("- ", "* ", "• ")):
+            text = _strip_md(stripped[2:].strip())
+            wrapped = _wrap(text, indent="       ")
+            wrapped[0] = "  •    " + wrapped[0].lstrip()
+            out += wrapped
+            continue
+
+        out += _wrap(_strip_md(stripped))
+
+    if in_fence:
+        flush_fence()
 
     if include_source:
-        story.extend(_render_source_appendix(code, language, styles))
+        src_lines = code.splitlines()
+        shown     = src_lines[:SOURCE_LINE_LIMIT]
+        omitted   = len(src_lines) - SOURCE_LINE_LIMIT
+        out += ["", DIV_H, "ORIGINAL SOURCE CODE".center(WIDTH), DIV_H,
+                f"  {filename}  ({language})", ""]
+        for ln in shown:
+            out.append("  " + ln)
+        if omitted > 0:
+            out += ["", f"  … {omitted:,} more lines not shown",
+                    f"  (showing first {SOURCE_LINE_LIMIT} of {len(src_lines):,})"]
 
-    story.append(Spacer(1, 20))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=COLOR_BORDER))
-    story.append(Spacer(1, 6))
-    story.append(
-        Paragraph(
-            "Generated by decode-for-humans &nbsp;·&nbsp; "
-            "Licensed under CC BY-NC-SA 4.0",
-            styles["footer"],
-        )
-    )
+    out += ["", DIV_L,
+            "Generated by decode-for-humans  ·  CC BY-NC-SA 4.0".center(WIDTH),
+            DIV_L]
 
-    doc.build(story)
+    output_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -516,127 +662,66 @@ def build_pdf(
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    """Parse and return command-line arguments.
-
-    Returns:
-        A Namespace with attributes: file, provider, no_source.
-    """
     parser = argparse.ArgumentParser(
         prog="decode-for-humans",
-        description=(
-            "Translate a source code file into a plain-English PDF "
-            "explanation for non-technical readers."
-        ),
+        description="Translate a source code file into plain-English Markdown.",
     )
-    parser.add_argument(
-        "file",
-        type=Path,
-        help="Path to the source code file to decode.",
-    )
-    parser.add_argument(
-        "--provider",
-        choices=list(PROVIDERS.keys()),
-        default=None,
-        help=(
-            "AI provider to use. Overrides the saved active provider. "
-            f"Choices: {', '.join(PROVIDERS.keys())}."
-        ),
-    )
-    parser.add_argument(
-        "--no-source",
-        action="store_true",
-        help="Omit the raw source code appendix from the PDF.",
-    )
+    parser.add_argument("file", type=Path)
+    parser.add_argument("--provider", choices=list(PROVIDERS.keys()), default=None)
+    parser.add_argument("--no-source", action="store_true")
+    parser.add_argument("--no-txt", action="store_true", help="Skip plain-text output")
     return parser.parse_args()
 
 
-def _resolve_provider(provider_name: str | None) -> tuple[str, str]:
-    """Look up the provider name and API key to use for this run.
-
-    Checks (in order): the --provider CLI flag, then the saved active
-    provider in config.json, then prompts the user if nothing is set.
-
-    Args:
-        provider_name: The --provider flag value, or None if not supplied.
-
-    Returns:
-        A (name, api_key) tuple.
-
-    Raises:
-        SystemExit: If no provider or key can be resolved.
-    """
+def _resolve_provider(name: str | None) -> tuple[str, str]:
     config = load_config()
-    name = provider_name or config.get("active_provider", "")
-
+    name   = name or config.get("active_provider", "")
     if not name:
-        print(
-            "No active provider configured.\n"
-            "Run the GUI and add an API key, or pass --provider NAME."
-        )
+        print("No active provider. Run the GUI and add an API key.")
         sys.exit(1)
-
-    api_key = config.get("keys", {}).get(name, "")
-
-    if not api_key:
-        print(
-            f"No API key found for '{name}'.\n"
-            "Run the GUI and add your key in Settings."
-        )
+    key = config.get("keys", {}).get(name, "")
+    if not key:
+        print(f"No API key for '{name}'.")
         sys.exit(1)
-
-    return name, api_key
+    return name, key
 
 
 def main() -> None:
-    """Entry point — orchestrates the full decode pipeline."""
-    args = _parse_args()
-    source_path = args.file
+    args   = _parse_args()
+    source = args.file
 
-    # 1. Read the file
-    print(f"Reading: {source_path}")
     try:
-        code = read_file(source_path)
+        code = read_file(source)
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}")
         sys.exit(1)
 
-    language = detect_language(source_path)
-    print(f"Detected language: {language}")
-    print(f"Size: {len(code.splitlines())} lines")
+    language = detect_language(source, content=code)
+    print(f"Language: {language}  ({len(code.splitlines())} lines)")
 
-    # 2. Resolve provider
+    if _is_minified(code):
+        print("Warning: file looks minified — explanation may be limited.")
+
     provider_name, api_key = _resolve_provider(args.provider)
     print(f"Provider: {provider_name}")
 
-    # 3. Build prompt and call the AI
-    prompt = build_prompt(source_path.name, language, code)
-    print("Sending to AI provider...")
+    prompt = build_prompt(source.name, language, code)
+    print("Sending to AI…")
     try:
-        provider = get_provider(provider_name, api_key)
-        explanation = provider.explain(prompt)
+        explanation = get_provider(provider_name, api_key).explain(prompt)
     except Exception as exc:
-        print(f"AI provider error: {exc}")
+        print(f"Error: {exc}")
         sys.exit(1)
 
-    print("Explanation received.")
+    include = not args.no_source
+    md_out  = source.with_name(source.stem + "_explanation.md")
+    build_md(md_out, source.name, language, code, explanation, include)
+    print(f"Markdown → {md_out}")
 
-    # 4. Generate the PDF
-    output_path = source_path.with_name(source_path.stem + "_explanation.pdf")
-    print(f"Building PDF: {output_path}")
-    try:
-        build_pdf(
-            output_path=output_path,
-            filename=source_path.name,
-            language=language,
-            code=code,
-            explanation=explanation,
-            include_source=not args.no_source,
-        )
-    except Exception as exc:
-        print(f"PDF generation error: {exc}")
-        sys.exit(1)
-
-    print(f"\nDone. PDF saved to: {output_path}")
+    if not args.no_txt:
+        txt_out = source.with_name(source.stem + "_explanation.txt")
+        build_txt(txt_out, source.name, language, code, explanation, include)
+        print(f"Text     → {txt_out}")
 
 
 if __name__ == "__main__":
