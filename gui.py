@@ -232,6 +232,12 @@ def _friendly_api_error(exc: Exception) -> str:
 
 
 class AddKeyDialog(ctk.CTkToplevel):
+	"""Two-step wizard for connecting a new AI provider.
+
+	Step 1 lets the user pick a provider from a radio button list.
+	Step 2 shows setup instructions, a key entry field, and a live
+	connection test. On success, ``result`` is set to (name, key).
+	"""
 
 	def __init__(self, parent):
 		super().__init__(parent)
@@ -263,6 +269,7 @@ class AddKeyDialog(ctk.CTkToplevel):
 	# ── Step 1: choose provider ───────────────────────────────────────────
 
 	def _show_step1(self):
+		"""Render the provider selection step (step 1 of 2)."""
 		for w in self._container.winfo_children():
 			w.destroy()
 
@@ -332,18 +339,22 @@ class AddKeyDialog(ctk.CTkToplevel):
 		              command=self._go_step2).pack(side="right", pady=10)
 
 	def _build_provider_card(self, parent, name, info):
+		"""Superseded by radio button rows in _show_step1."""
 		pass  # superseded by radio button rows in _show_step1
 
 	def _select(self, name):
+		"""Set the selected provider and sync the radio button."""
 		self._selected = name
 		self._radio_var.set(name)
 
 	def _highlight_card(self):
+		"""No-op — radio buttons handle visual state."""
 		pass  # radio buttons handle visual state
 
 		# ── Step 2: instructions + key entry ─────────────────────────────────
 
 	def _go_step2(self):
+		"""Render the key entry step (step 2 of 2)."""
 		for w in self._container.winfo_children():
 			w.destroy()
 
@@ -456,11 +467,13 @@ class AddKeyDialog(ctk.CTkToplevel):
 		self._test_btn.pack(side="right", padx=(0, 8), pady=10)
 
 	def _toggle_show(self):
+		"""Toggle API key visibility between masked and plain text."""
 		self._show_key = not self._show_key
 		self._key_entry.configure(show="" if self._show_key else "•")
 		self._show_btn.configure(text="Hide" if self._show_key else "Show")
 
 	def _test_key(self):
+		"""Validate the entered key by firing a minimal API call."""
 		key = self._key_var.get().strip()
 		if not key:
 			self._test_lbl.configure(text="⚠  Paste a key first.", text_color="#d4974a")
@@ -470,6 +483,11 @@ class AddKeyDialog(ctk.CTkToplevel):
 		threading.Thread(target=self._run_test, args=(key,), daemon=True).start()
 
 	def _run_test(self, key: str):
+		"""Worker thread: test the key and update the feedback label.
+
+		Args:
+			key: The raw API key string to test.
+		"""
 		ok = False
 		try:
 			ok = get_provider(self._selected, key).test_connection()
@@ -485,6 +503,7 @@ class AddKeyDialog(ctk.CTkToplevel):
 			self.after(0, lambda: self._save_btn.configure(state="normal"))
 
 	def _save(self):
+		"""Store the validated key in result and close the dialog."""
 		key = self._key_var.get().strip()
 		if not key:
 			self._test_lbl.configure(text="⚠  Paste your key first.", text_color="#d4974a")
@@ -498,6 +517,12 @@ class AddKeyDialog(ctk.CTkToplevel):
 # ---------------------------------------------------------------------------
 
 class SettingsWindow(ctk.CTkToplevel):
+	"""Modal settings panel for managing saved API keys.
+
+	Displays all saved provider keys with masked values, allows
+	the user to set the active provider, add new keys via
+	AddKeyDialog, or remove existing ones.
+	"""
 
 	def __init__(self, parent, on_close):
 		super().__init__(parent)
@@ -514,6 +539,7 @@ class SettingsWindow(ctk.CTkToplevel):
 		self._refresh_keys()
 
 	def _build(self):
+		"""Build the scrollable settings layout."""
 		scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
 		scroll.pack(fill="both", expand=True, padx=4, pady=4)
 		self._scroll = scroll
@@ -548,6 +574,7 @@ class SettingsWindow(ctk.CTkToplevel):
 		                variable=self._save_next).pack(anchor="w", padx=16, pady=2)
 
 	def _refresh_keys(self):
+		"""Reload saved keys from config and redraw the key list."""
 		for w in self._keys_frame.winfo_children():
 			w.destroy()
 		config = load_config()
@@ -598,6 +625,7 @@ class SettingsWindow(ctk.CTkToplevel):
 			              ).pack(side="right", padx=(4, 0), pady=6)
 
 	def _add_key(self):
+		"""Open the AddKeyDialog wizard and save the result."""
 		dlg = AddKeyDialog(self)
 		self.wait_window(dlg)
 		if dlg.result:
@@ -610,12 +638,22 @@ class SettingsWindow(ctk.CTkToplevel):
 			self._refresh_keys()
 
 	def _set_active(self, name: str):
+		"""Set the named provider as the active one in config.
+
+		Args:
+			name: Provider display name (e.g. "Claude").
+		"""
 		cfg = load_config()
 		cfg["active_provider"] = name
 		save_config(cfg)
 		self._refresh_keys()
 
 	def _remove(self, name: str):
+		"""Prompt for confirmation then delete the named provider key.
+
+		Args:
+			name: Provider display name to remove.
+		"""
 		if not messagebox.askyesno("Remove key", f"Remove the saved key for {name}?"):
 			return
 		cfg = load_config()
@@ -627,6 +665,7 @@ class SettingsWindow(ctk.CTkToplevel):
 		self._refresh_keys()
 
 	def _close(self):
+		"""Run the on_close callback then destroy the window."""
 		self._on_close()
 		self.destroy()
 
@@ -636,6 +675,12 @@ class SettingsWindow(ctk.CTkToplevel):
 # ---------------------------------------------------------------------------
 
 class DecodeForHumansApp(ctk.CTk):
+	"""Main application window for decode-for-humans.
+
+	Provides a file drop zone, decode options, a console log pane,
+	and access to Settings and Batch mode. Decode operations run
+	in a background thread; results are relayed via a queue.
+	"""
 
 	def __init__(self):
 		super().__init__()
@@ -663,6 +708,7 @@ class DecodeForHumansApp(ctk.CTk):
 	# ── Header ────────────────────────────────────────────────────────────
 
 	def _build_header(self):
+		"""Build the top header bar with title, provider badge, and settings button."""
 		hdr = ctk.CTkFrame(self, height=52, corner_radius=0,
 		                   fg_color=("gray88", "gray14"))
 		hdr.pack(fill="x")
@@ -701,6 +747,7 @@ class DecodeForHumansApp(ctk.CTk):
 	# ── Body ──────────────────────────────────────────────────────────────
 
 	def _build_body(self):
+		"""Build the main body: tabs, drop zone, options, and decode button."""
 		body = ctk.CTkFrame(self, fg_color="transparent")
 		body.pack(fill="x", padx=20, pady=14)
 
@@ -748,6 +795,7 @@ class DecodeForHumansApp(ctk.CTk):
 		self._progress = ctk.CTkProgressBar(body, mode="indeterminate")
 
 	def _build_drop_zone(self):
+		"""Render the empty drop zone with supported language list."""
 		for w in self._drop_frame.winfo_children():
 			w.destroy()
 
@@ -811,6 +859,7 @@ class DecodeForHumansApp(ctk.CTk):
 			child.bind("<Button-1>", lambda _: self._browse_file())
 
 	def _build_file_loaded_row(self):
+		"""Replace the drop zone with a file info card for the loaded file."""
 		for w in self._drop_frame.winfo_children():
 			w.destroy()
 
@@ -855,6 +904,7 @@ class DecodeForHumansApp(ctk.CTk):
 	# ── Console ───────────────────────────────────────────────────────────
 
 	def _build_console(self):
+		"""Build the console pane with coloured log output and action buttons."""
 		console_outer = ctk.CTkFrame(self, fg_color=("gray88", "gray14"),
 		                             corner_radius=0)
 		console_outer.pack(fill="both", expand=True, side="bottom")
@@ -885,6 +935,7 @@ class DecodeForHumansApp(ctk.CTk):
 			font=("Courier", 9), anchor="e")
 
 		def _place_lc(event=None):
+			"""Reposition the line counter text when the canvas is resized."""
 			w = self._lc_canvas.winfo_width()
 			if w > 1:
 				self._lc_canvas.coords(self._lc_item, w, 10)
@@ -950,9 +1001,16 @@ class DecodeForHumansApp(ctk.CTk):
 	# ── Console helpers ───────────────────────────────────────────────────
 
 	def _log(self, message: str, level: str = "info"):
+		"""Enqueue a timestamped log message for the console.
+
+		Args:
+			message: Text to display.
+			level: Colour tag key from LOG_COLORS (default "info").
+		"""
 		self._log_queue.put((datetime.now().strftime("%H:%M:%S"), message, level))
 
 	def _poll_log_queue(self):
+		"""Drain the log queue and schedule the next poll in 100 ms."""
 		try:
 			while True:
 				item = self._log_queue.get_nowait()
@@ -972,12 +1030,14 @@ class DecodeForHumansApp(ctk.CTk):
 		self.after(100, self._poll_log_queue)
 
 	def _clear_console(self):
+		"""Clear all console text and reset the line counter."""
 		self._console_text.delete("1.0", "end")
 		self._line_count = 0
 		self._lc_canvas.itemconfig(self._lc_item, text="0 lines")
 		self._status_var.set("")
 
 	def _copy_logs(self):
+		"""Copy all console text to the system clipboard."""
 		import platform, subprocess
 		text = self._console_text.get("1.0", "end").strip()
 		if not text:
@@ -999,11 +1059,17 @@ class DecodeForHumansApp(ctk.CTk):
 		self.after(1500, lambda: self._status_var.set(""))
 
 	def _set_dot(self, color: str):
+		"""Update the status dot colour in the console header.
+
+		Args:
+			color: Hex colour string (e.g. "#4ec94e" for green).
+		"""
 		self._dot_canvas.itemconfig(self._dot_item, fill=color)
 
 	# ── File management ───────────────────────────────────────────────────
 
 	def _browse_file(self):
+		"""Open a file picker and load the chosen file."""
 		path_str = filedialog.askopenfilename(
 			title="Select a source code file",
 			filetypes=[
@@ -1027,6 +1093,11 @@ class DecodeForHumansApp(ctk.CTk):
 			self._load_file(Path(path_str))
 
 	def _load_file(self, path: Path):
+		"""Validate and load a source file into the drop zone.
+
+		Args:
+			path: Path to the source file to load.
+		"""
 		ext = path.suffix.lower()
 		# Reject known-unsupported formats immediately with a clear message
 		if ext in _UNSUPPORTED_FORMATS and ext not in EXTENSION_MAP:
@@ -1051,6 +1122,7 @@ class DecodeForHumansApp(ctk.CTk):
 		self._set_dot("#4ec94e")
 
 	def _clear_file(self):
+		"""Clear the loaded file and restore the empty drop zone."""
 		self._source_path = None
 		self._build_drop_zone()
 		self._decode_btn.configure(state="disabled")
@@ -1061,13 +1133,16 @@ class DecodeForHumansApp(ctk.CTk):
 	# ── Settings ──────────────────────────────────────────────────────────
 
 	def _open_settings(self):
+		"""Open the Settings window."""
 		SettingsWindow(self, on_close=self._refresh_provider_badge)
 
 	def _downloads_folder(self) -> "Path":
+		"""Return the Downloads folder, falling back to home if it does not exist."""
 		d = Path.home() / "Downloads"
 		return d if d.exists() else Path.home()
 
 	def _open_batch(self):
+		"""Open the batch decode window if a provider is configured."""
 		cfg = load_config()
 		name = cfg.get("active_provider", "")
 		key = cfg.get("keys", {}).get(name, "")
@@ -1079,6 +1154,7 @@ class DecodeForHumansApp(ctk.CTk):
 		            log_fn=self._log, downloads=self._downloads_folder())
 
 	def _refresh_provider_badge(self):
+		"""Update the provider button with the active provider name and brand colour."""
 		cfg = load_config()
 		name = cfg.get("active_provider", "")
 
@@ -1108,6 +1184,7 @@ class DecodeForHumansApp(ctk.CTk):
 	# ── Decode pipeline ───────────────────────────────────────────────────
 
 	def _start_decode(self):
+		"""Validate state and launch the decode worker thread."""
 		if self._running or not self._source_path:
 			return
 		cfg = load_config()
@@ -1131,6 +1208,15 @@ class DecodeForHumansApp(ctk.CTk):
 		).start()
 
 	def _decode_worker(self, source_path, provider_name, api_key, include_source, export_txt=True):
+		"""Background thread: read, prompt, call AI, write outputs, signal done.
+
+		Args:
+			source_path: Path to the source file to decode.
+			provider_name: Active provider display name.
+			api_key: API key for the provider.
+			include_source: Whether to append source code to the output.
+			export_txt: Whether to also write a plain-text output file.
+		"""
 		import time
 		downloads = Path.home() / "Downloads"
 		folder = downloads if downloads.exists() else Path.home()
@@ -1203,6 +1289,7 @@ class DecodeForHumansApp(ctk.CTk):
 			self._log_queue.put((_DECODE_DONE, "", ""))
 
 	def _on_decode_finished(self):
+		"""Stop the progress bar and re-enable the decode button."""
 		self._running = False
 		self._progress.stop()
 		self._progress.pack_forget()
@@ -1248,6 +1335,7 @@ class BatchWindow(ctk.CTkToplevel):
 	# ── UI construction ───────────────────────────────────────────────────
 
 	def _build_ui(self):
+		"""Build the batch window layout with folder picker, file list, and controls."""
 		# Header
 		hdr = ctk.CTkFrame(self, fg_color=("gray88", "gray15"),
 		                   corner_radius=0, height=56)
@@ -1354,6 +1442,7 @@ class BatchWindow(ctk.CTkToplevel):
 	# ── Folder scanning ───────────────────────────────────────────────────
 
 	def _browse(self):
+		"""Open a folder picker and trigger a file scan."""
 		folder = filedialog.askdirectory(title="Select folder to batch decode")
 		if not folder:
 			return
@@ -1396,6 +1485,11 @@ class BatchWindow(ctk.CTkToplevel):
 		threading.Thread(target=self._estimate_all, args=(files,), daemon=True).start()
 
 	def _add_file_row(self, path: "Path"):
+		"""Render a single file row in the batch list with checkbox, name, language, and line count.
+
+		Args:
+			path: Path to the source file being listed.
+		"""
 		row = ctk.CTkFrame(self._list, fg_color="transparent")
 		row.pack(fill="x", padx=4, pady=1)
 
@@ -1456,6 +1550,7 @@ class BatchWindow(ctk.CTkToplevel):
 		self.after(0, self._update_summary)
 
 	def _update_summary(self):
+		"""Recompute selected file count and token estimate and update the summary label."""
 		selected = [p for p, r in self._file_rows.items() if r["var"].get()]
 		n = len(selected)
 		tok = sum(self._token_ests.get(p, 2000) for p in selected)
@@ -1469,6 +1564,7 @@ class BatchWindow(ctk.CTkToplevel):
 	# ── Batch execution ───────────────────────────────────────────────────
 
 	def _confirm_start(self):
+		"""Show a confirmation dialog and start the batch if confirmed."""
 		selected = [p for p, r in self._file_rows.items() if r["var"].get()]
 		if not selected:
 			return
@@ -1490,6 +1586,11 @@ class BatchWindow(ctk.CTkToplevel):
 		self._run_batch(selected)
 
 	def _run_batch(self, files: list):
+		"""Hide the window and launch the batch worker thread.
+
+		Args:
+			files: List of Paths to decode.
+		"""
 		self._running = True
 		# Hide immediately so the main console is accessible for copy/clear
 		self.withdraw()
@@ -1497,6 +1598,11 @@ class BatchWindow(ctk.CTkToplevel):
 		                 args=(files,), daemon=True).start()
 
 	def _batch_worker(self, files: list):
+		"""Background thread: decode each file and log results to the main console.
+
+		Args:
+			files: List of Paths to decode in order.
+		"""
 		import time
 		downloads = self._downloads
 		ok = 0
@@ -1542,6 +1648,13 @@ class BatchWindow(ctk.CTkToplevel):
 		self.after(0, self._on_batch_done)
 
 	def _set_status(self, path: "Path", icon: str, color: str):
+		"""Update the status icon for a file row in the batch list.
+
+		Args:
+			path: The file whose row should be updated.
+			icon: Unicode icon to display (e.g. "✓", "✗", "⏳").
+			color: Hex colour string for the icon.
+		"""
 		try:
 			if path in self._file_rows:
 				self._file_rows[path]["status"].configure(text=icon, text_color=color)
@@ -1549,6 +1662,7 @@ class BatchWindow(ctk.CTkToplevel):
 			pass  # window may be hidden
 
 	def _on_batch_done(self):
+		"""Mark the batch as complete and close the window."""
 		self._running = False
 		try:
 			self.destroy()
