@@ -25,6 +25,13 @@ provider, and get back a structured explanation:
 - **Plain-English Summary** — executive-ready paragraph
 - **Original Source Code** — the full source appended for reference
 
+**Built for understanding and accountability.** The structured output —
+with assumptions, risks, and dependencies called out explicitly — means
+non-technical stakeholders can read, understand, and sign off on what
+code does. Useful for compliance documentation, audit trails, code reviews
+involving non-developers, and any situation where someone needs to defend
+a technical decision to a non-technical audience.
+
 ---
 
 ## Features
