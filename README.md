@@ -1,5 +1,18 @@
 # decode-for-humans
 
+[![Link Check](https://github.com/hihipy/decode-for-humans/actions/workflows/links.yml/badge.svg)](https://github.com/hihipy/decode-for-humans/actions/workflows/links.yml)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+**Built with**
+
+[![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![CustomTkinter](https://img.shields.io/badge/CustomTkinter-1F6AA5?style=flat&logoColor=white)](https://customtkinter.tomschimansky.com)
+[![Anthropic](https://img.shields.io/badge/Anthropic-D97757?style=flat&logoColor=white)](https://www.anthropic.com)
+[![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat&logo=openai&logoColor=white)](https://openai.com)
+[![Gemini](https://img.shields.io/badge/Gemini-8E75B2?style=flat&logo=googlegemini&logoColor=white)](https://ai.google.dev)
+[![Mistral](https://img.shields.io/badge/Mistral-FA520F?style=flat&logo=mistralai&logoColor=white)](https://mistral.ai)
+[![Groq](https://img.shields.io/badge/Groq-2D2D2D?style=flat&logoColor=white)](https://groq.com)
+
 **Turn code into plain English — for the people who don't speak it.**
 
 `decode-for-humans` reads source code files and explains what they do in
