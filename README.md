@@ -5,7 +5,7 @@
 
 **Built with**
 
-[![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org)
 [![CustomTkinter](https://img.shields.io/badge/CustomTkinter-1F6AA5?style=flat&logoColor=white)](https://customtkinter.tomschimansky.com)
 [![Anthropic](https://img.shields.io/badge/Anthropic-D97757?style=flat&logoColor=white)](https://www.anthropic.com)
 [![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat&logo=openai&logoColor=white)](https://openai.com)
