@@ -15,7 +15,7 @@
 
 **Turn code into plain English, for the people who don't speak it.**
 
-`decode-for-humans` reads source code files and explains what they do in
+Decode for Humans reads source code files and explains what they do in
 clear, jargon-free language that anyone can follow, no programming
 knowledge required. It produces a clean **Markdown** and **plain-text**
 explanation you can open, share, or paste straight into a document.
@@ -28,7 +28,7 @@ Most code is written by technical people and read only by other technical
 people. But code makes decisions, handles data, and affects real workflows,
 and the people responsible for those things often can't read it.
 
-`decode-for-humans` closes that gap. Drop in a source file, pick an AI
+Decode for Humans closes that gap. Drop in a source file, pick an AI
 provider, and get back a structured explanation:
 
 - **What This File Does:** plain-language summary of the purpose
