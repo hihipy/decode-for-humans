@@ -5,12 +5,12 @@
 
 **Built with**
 
-[![Anthropic](https://img.shields.io/badge/Anthropic-D97757?style=flat&logoColor=white)](https://www.anthropic.com)
+[![ChatGPT](https://img.shields.io/badge/ChatGPT-412991?style=flat&logo=openai&logoColor=white)](https://openai.com)
+[![Claude](https://img.shields.io/badge/Claude-D97757?style=flat&logoColor=white)](https://www.anthropic.com)
 [![CustomTkinter](https://img.shields.io/badge/CustomTkinter-1F6AA5?style=flat&logoColor=white)](https://customtkinter.tomschimansky.com)
 [![Gemini](https://img.shields.io/badge/Gemini-8E75B2?style=flat&logo=googlegemini&logoColor=white)](https://ai.google.dev)
 [![Groq](https://img.shields.io/badge/Groq-2D2D2D?style=flat&logoColor=white)](https://groq.com)
 [![Mistral](https://img.shields.io/badge/Mistral-FA520F?style=flat&logo=mistralai&logoColor=white)](https://mistral.ai)
-[![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat&logo=openai&logoColor=white)](https://openai.com)
 [![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org)
 
 **Turn code into plain English, for the people who don't speak it.**
