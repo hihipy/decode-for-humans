@@ -1,10 +1,10 @@
 # Patterns of URLs lychee should skip during link checks.
 # One regex per line. Lines starting with # are ignored.
 
-# AI-vendor homepages that bot-block CI: OpenAI 403s, Google AI 302-loops.
-# Both badge links resolve fine in a browser.
-^https://openai\.com
-^https://ai\.google\.dev
+# Gemini's homepage fails HTTP/2 negotiation against CI runners, which
+# produces a transport error rather than a status code, so --accept cannot
+# cover it. The badge link resolves fine in a browser.
+^https://gemini\.google\.com
 
 # Placeholder links in code-block examples.
 example\.com

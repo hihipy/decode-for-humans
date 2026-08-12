@@ -11,7 +11,7 @@
 [![Gemini](https://img.shields.io/badge/Gemini-8E75B2?style=flat&logo=googlegemini&logoColor=white)](https://gemini.google.com)
 [![Groq](https://img.shields.io/badge/Groq-F55036?style=flat&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyBmaWxsPSIjZmZmZmZmIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTIuMDM2IDJjLTMuODUzLS4wMzUtNyAzLTcuMDM2IDYuNzgxLS4wMzUgMy43ODIgMy4wNTUgNi44NzIgNi45MDggNi45MDdoMi40MnYtMi41NjZoLTIuMjkyYy0yLjQwNy4wMjgtNC4zOC0xLjg2Ni00LjQwOC00LjIzLS4wMjktMi4zNjIgMS45MDEtNC4yOTggNC4zMDgtNC4zMjZoLjFjMi40MDcgMCA0LjM1OCAxLjkxNSA0LjM2NSA0LjI3OHY2LjMwNWMwIDIuMzQyLTEuOTQ0IDQuMjUtNC4zMjMgNC4yNzlhNC4zNzUgNC4zNzUgMCAwMS0zLjAzMy0xLjI1MmwtMS44NTEgMS44MThBNyA3IDAgMDAxMi4wMjkgMjJoLjA5MmMzLjgwMy0uMDU2IDYuODU4LTMuMDgzIDYuODc5LTYuODE2di02LjVDMTguOTA3IDQuOTYzIDE1LjgxNyAyIDEyLjAzNiAyeiI%2BPC9wYXRoPjwvc3ZnPg%3D%3D)](https://groq.com)
 [![Mistral](https://img.shields.io/badge/Mistral-FA520F?style=flat&logo=mistralai&logoColor=white)](https://mistral.ai)
-[![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org)
 
 **Turn code into plain English, for the people who don't speak it.**
 
